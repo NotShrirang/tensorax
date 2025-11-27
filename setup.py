@@ -199,8 +199,8 @@ setup(
         'build_ext': BuildExtension
     },
     install_requires=[
-        # Pure C++/CUDA backend - no runtime dependencies!
-        'torch>=1.9.0',  # For build utilities only (cpp_extension)
+        # Pure C++/CUDA backend - minimal dependencies!
+        'pybind11>=2.6.0',  # Python-C++ bindings
     ],
     extras_require={
         'dev': [
