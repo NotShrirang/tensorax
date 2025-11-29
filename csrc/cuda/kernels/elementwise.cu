@@ -11,6 +11,15 @@ __global__ void add_kernel(const float* a, const float* b, float* out, int64_t s
     }
 }
 
+__global__ void broadcasting_add_kernel(const float* __restrict__ a, const float* __restrict__ b, float* out, int64_t size_a, int64_t size_b) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;  // row index (0 to size_b-1)
+    int64_t j = blockIdx.y * blockDim.y + threadIdx.y;  // col index (0 to size_a-1)
+    
+    if (i < size_b && j < size_a) {
+        out[i * size_a + j] = a[j] + b[i];
+    }
+}
+
 __global__ void sub_kernel(const float* a, const float* b, float* out, int64_t size) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
@@ -67,6 +76,14 @@ void add_cuda(const float* a, const float* b, float* out, int64_t size) {
     dim3 grid = cuda::get_grid_size(size);
     dim3 block(cuda::BLOCK_SIZE);
     cuda::add_kernel<<<grid, block>>>(a, b, out, size);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+void broadcasting_add_cuda(const float* a, const float* b, float* out, int64_t size_a, int64_t size_b) {
+    dim3 block(16, 16);  // 2D block for 2D operation
+    dim3 grid((size_b + block.x - 1) / block.x, (size_a + block.y - 1) / block.y);
+    cuda::broadcasting_add_kernel<<<grid, block>>>(a, b, out, size_a, size_b);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 }

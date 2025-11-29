@@ -9,6 +9,7 @@ try:
 except ImportError:
     _C = None  # Will be available after building
 
+from tensora.utils.type_checks import is_numpy_array
 
 class Tensor:
     """
@@ -80,6 +81,11 @@ class Tensor:
                 result.extend(flatten(item))
             return result
         
+        if is_numpy_array(data):
+            shape = data.shape
+            flat = data.flatten().tolist()
+            return flat, shape
+
         shape = tuple(get_shape(data))
         flat = flatten(data)
         return flat, shape
@@ -187,16 +193,42 @@ class Tensor:
         
         if self.device != other.device:
             raise RuntimeError(f"Tensors on different devices: {self.device} vs {other.device}")
-        
-        result = Tensor.__new__(Tensor)
-        result._shape = self._shape
-        result._size = self._size
-        result.dtype = self.dtype
-        result.device = self.device
-        result.grad = None
-        
+
+        shape_a = self._shape
+        shape_b = other._shape
+
         if _C:
-            result._c_tensor = _C.add(self._c_tensor, other._c_tensor)
+            if shape_a == shape_b:
+                result = Tensor.__new__(Tensor)
+                result._shape = self._shape
+                result._size = self._size
+                result.dtype = self.dtype
+                result.device = self.device
+                result.grad = None
+                result._c_tensor = _C.add(self._c_tensor, other._c_tensor)
+            else:
+                # Broadcasting case
+                result_shape = []
+                len_a = len(shape_a)
+                len_b = len(shape_b)
+                for i in range(max(len_a, len_b)):
+                    dim_a = shape_a[-(i+1)] if i < len_a else 1
+                    dim_b = shape_b[-(i+1)] if i < len_b else 1
+                    if dim_a != dim_b and dim_a != 1 and dim_b != 1:
+                        raise RuntimeError(f"Incompatible shapes for broadcasting: {shape_a} and {shape_b}")
+                    result_shape.insert(0, max(dim_a, dim_b))
+                
+                result = Tensor.__new__(Tensor)
+                result._shape = tuple(result_shape)
+                result._size = Tensor._compute_size(result_shape)
+                result.dtype = self.dtype
+                result.device = self.device
+                result.grad = None
+
+                if shape_a < shape_b:
+                    result._c_tensor = _C.broadcasting_add(self._c_tensor, other._c_tensor)
+                else:
+                    result._c_tensor = _C.broadcasting_add(other._c_tensor, self._c_tensor)
         
         if self.requires_grad or other.requires_grad:
             result.requires_grad = True

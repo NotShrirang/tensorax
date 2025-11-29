@@ -49,6 +49,7 @@ namespace tensora
 
     // Element-wise operations
     TensorHandle add(const TensorHandle &a, const TensorHandle &b);
+    TensorHandle broadcasting_add(const TensorHandle &a, const TensorHandle &b);
     TensorHandle subtract(const TensorHandle &a, const TensorHandle &b);
     TensorHandle multiply(const TensorHandle &a, const TensorHandle &b);
     TensorHandle divide(const TensorHandle &a, const TensorHandle &b);
@@ -78,6 +79,7 @@ namespace tensora
 
     // Low-level CPU operations
     void add_cpu(const float *a, const float *b, float *out, int64_t size);
+    void broadcasting_add_cpu(const float *a, const float *b, float *out, int64_t size_a, int64_t size_b);
     void sub_cpu(const float *a, const float *b, float *out, int64_t size);
     void mul_cpu(const float *a, const float *b, float *out, int64_t size);
     void div_cpu(const float *a, const float *b, float *out, int64_t size);
@@ -91,6 +93,7 @@ namespace tensora
 #ifdef WITH_CUDA
     // Low-level CUDA operations
     void add_cuda(const float *a, const float *b, float *out, int64_t size);
+    void broadcasting_add_cuda(const float *a, const float *b, float *out, int64_t size_a, int64_t size_b);
     void sub_cuda(const float *a, const float *b, float *out, int64_t size);
     void mul_cuda(const float *a, const float *b, float *out, int64_t size);
     void div_cuda(const float *a, const float *b, float *out, int64_t size);

@@ -21,7 +21,7 @@ try:
     from . import _C
     _cuda_available = hasattr(_C, 'cuda_is_available') and _C.cuda_is_available()
 except ImportError:
-    _cuda_available = False
+    _cuda_available = False 
 
 def cuda_is_available():
     """Check if CUDA is available."""

@@ -14,6 +14,17 @@ namespace tensora
         }
     }
 
+    void broadcasting_add_cpu(const float *a, const float *b, float *out, int64_t size_a, int64_t size_b)
+    {
+        for (int64_t i = 0; i < size_b; ++i)
+        {
+            for (int64_t j = 0; j < size_a; ++j)
+            {
+                out[i * size_a + j] = a[j] + b[i];
+            }
+        }
+    }
+
     void sub_cpu(const float *a, const float *b, float *out, int64_t size)
     {
         for (int64_t i = 0; i < size; ++i)

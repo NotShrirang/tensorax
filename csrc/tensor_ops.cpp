@@ -133,6 +133,44 @@ namespace tensora
         return result;
     }
 
+    TensorHandle broadcasting_add(const TensorHandle &a, const TensorHandle &b)
+    {
+        std::vector<int64_t> result_shape;
+        int64_t ndim_a = a->shape.size();
+        int64_t ndim_b = b->shape.size();
+        int64_t ndim_result = std::max(ndim_a, ndim_b);
+
+        for (int64_t i = 0; i < ndim_result; ++i)
+        {
+            int64_t dim_a = (i < ndim_result - ndim_a) ? 1 : a->shape[i - (ndim_result - ndim_a)];
+            int64_t dim_b = (i < ndim_result - ndim_b) ? 1 : b->shape[i - (ndim_result - ndim_b)];
+            if (dim_a != dim_b && dim_a != 1 && dim_b != 1)
+            {
+                throw std::runtime_error("Shapes are not broadcastable");
+            }
+            result_shape.push_back(std::max(dim_a, dim_b));
+        }
+
+        int64_t result_size = 1;
+        for (auto dim : result_shape)
+        {
+            result_size *= dim;
+        }
+
+        auto result = std::make_shared<TensorImpl>(std::vector<float>(result_size), result_shape, a->dtype, a->device);
+        if (a->device == "cpu")
+        {
+            broadcasting_add_cpu(a->data, b->data, result->data, a->size, b->size);
+        }
+        else
+        {
+#ifdef WITH_CUDA
+            broadcasting_add_cuda(a->data, b->data, result->data, a->size, b->size);
+#endif
+        }
+        return result;
+    }
+
     TensorHandle subtract(const TensorHandle &a, const TensorHandle &b)
     {
         auto result = std::make_shared<TensorImpl>(std::vector<float>(a->size),
@@ -432,6 +470,7 @@ PYBIND11_MODULE(_C, m)
 
     // Operations
     m.def("add", &tensora::add);
+    m.def("broadcasting_add", &tensora::broadcasting_add);
     m.def("subtract", &tensora::subtract);
     m.def("multiply", &tensora::multiply);
     m.def("divide", &tensora::divide);
