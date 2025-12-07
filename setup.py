@@ -114,12 +114,10 @@ class BuildExtension(build_ext):
                         '--use_fast_math',
                         '-std=c++17',
                         '--compiler-options', '-fPIC',
-                        # Architectures supported by CUDA 11.5
-                        '-gencode=arch=compute_70,code=sm_70',  # V100
                         '-gencode=arch=compute_75,code=sm_75',  # T4, RTX 20xx
                         '-gencode=arch=compute_80,code=sm_80',  # A100
                         '-gencode=arch=compute_86,code=sm_86',  # RTX 30xx
-                        # Note: compute_89 (RTX 40xx) requires CUDA 11.8+
+                        '-gencode=arch=compute_89,code=sm_89',  # RTX 40xx (CUDA 11.8+)
                     ]
                 }
             else:
@@ -187,13 +185,13 @@ else:
 setup(
     name='tensora',
     version=read_version(),
-    author='Your Name',
-    author_email='your.email@example.com',
+    author='Shrirang Mahajan',
+    author_email='shrirangmahajan123@gmail.com',
     description='A high-performance tensor library with CUDA acceleration',
     long_description=long_description,
     long_description_content_type='text/markdown',
     url='https://github.com/NotShrirang/tensora',
-    packages=find_packages(exclude=['tests', 'examples', 'docs']),
+    packages=find_packages(exclude=['tests', 'examples', 'docs']) + ['tensora.utils'],
     ext_modules=ext_modules,
     cmdclass={
         'build_ext': BuildExtension

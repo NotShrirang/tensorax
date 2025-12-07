@@ -78,6 +78,9 @@ def tanh(x: Tensor) -> Tensor:
 
 def softmax(x: Tensor, dim: int = -1) -> Tensor:
     """Softmax activation function."""
+    if dim < 0:
+        dim += len(x._shape)
+
     result = Tensor.__new__(Tensor)
     result._shape = x._shape
     result._size = x._size
@@ -90,7 +93,7 @@ def softmax(x: Tensor, dim: int = -1) -> Tensor:
     
     if x.requires_grad:
         result.requires_grad = True
-        result._grad_fn = ('softmax', x, dim)
+        result._grad_fn = ('softmax', x, result, dim)
     else:
         result.requires_grad = False
         result._grad_fn = None

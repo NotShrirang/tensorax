@@ -50,6 +50,7 @@ namespace tensora
 
     TensorHandle matmul(const TensorHandle &a, const TensorHandle &b);
     TensorHandle transpose(const TensorHandle &a);
+    TensorHandle sum(const TensorHandle &x, int64_t dim);
 
     TensorHandle relu(const TensorHandle &x);
     TensorHandle sigmoid(const TensorHandle &x);
@@ -73,13 +74,14 @@ namespace tensora
     void sub_cpu(const float *a, const float *b, float *out, int64_t size);
     void mul_cpu(const float *a, const float *b, float *out, int64_t size);
     void div_cpu(const float *a, const float *b, float *out, int64_t size);
-    void matmul_cpu(const float *a, const float *b, float *out,
-                    int64_t m, int64_t n, int64_t k);
+    void matmul_cpu(const float *a, const float *b, float *out, int64_t batch_size, int64_t m, int64_t n, int64_t k);
     void relu_cpu(const float *in, float *out, int64_t size);
     void sigmoid_cpu(const float *in, float *out, int64_t size);
     void tanh_cpu(const float *in, float *out, int64_t size);
+    void softmax_cpu(const float *in, float *out, const std::vector<int64_t> &shape, int64_t dim);
     void sqrt_cpu(const float *in, float *out, int64_t size);
     void pow_cpu(const float *in, float *out, float power, int64_t size);
+    void sum_cpu(const float *in, float *out, const std::vector<int64_t> &shape, int64_t dim);
 
 #ifdef WITH_CUDA
     void add_cuda(const float *a, const float *b, float *out, int64_t size);
@@ -91,12 +93,13 @@ namespace tensora
     void mul_cuda(const float *a, const float *b, float *out, int64_t size);
     void div_cuda(const float *a, const float *b, float *out, int64_t size);
     void matmul_cuda(const float *a, const float *b, float *out,
-                     int64_t m, int64_t n, int64_t k);
+                     int64_t batch_size, int64_t m, int64_t n, int64_t k);
     void relu_cuda(const float *in, float *out, int64_t size);
     void sigmoid_cuda(const float *in, float *out, int64_t size);
     void tanh_cuda(const float *in, float *out, int64_t size);
     void sqrt_cuda(const float *in, float *out, int64_t size);
     void pow_cuda(const float *in, float *out, float power, int64_t size);
+    void sum_cuda(const float *in, float *out, const std::vector<int64_t> &shape, int64_t dim);
 
     void *cuda_malloc(size_t size);
     void cuda_free(void *ptr);

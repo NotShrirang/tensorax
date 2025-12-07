@@ -14,11 +14,11 @@ class Module:
         self._modules = {}
         self.training = True
     
-    def forward(self, *args, **kwargs):
+    def forward(self, *args, **kwargs) -> Tensor:
         """Forward pass - to be implemented by subclasses."""
         raise NotImplementedError
     
-    def __call__(self, *args, **kwargs):
+    def __call__(self, *args, **kwargs) -> Tensor:
         """Make module callable."""
         return self.forward(*args, **kwargs)
     
@@ -37,18 +37,18 @@ class Module:
             for name, param in module.named_parameters():
                 yield f"{module_name}.{name}", param
     
-    def train(self, mode: bool = True):
+    def train(self, mode: bool = True) -> 'Module':
         """Set module to training mode."""
         self.training = mode
         for module in self._modules.values():
             module.train(mode)
         return self
     
-    def eval(self):
+    def eval(self) -> 'Module':
         """Set module to evaluation mode."""
         return self.train(False)
     
-    def cuda(self):
+    def cuda(self) -> 'Module':
         """Move all parameters to CUDA."""
         for name, param in self._parameters.items():
             self._parameters[name] = param.cuda()
@@ -56,7 +56,7 @@ class Module:
             module.cuda()
         return self
     
-    def cpu(self):
+    def cpu(self) -> 'Module':
         """Move all parameters to CPU."""
         for name, param in self._parameters.items():
             self._parameters[name] = param.cpu()
@@ -64,7 +64,7 @@ class Module:
             module.cpu()
         return self
     
-    def to(self, device: str):
+    def to(self, device: str) -> 'Module':
         """Move module to specified device."""
         if device == 'cuda':
             return self.cuda()
@@ -73,7 +73,7 @@ class Module:
         else:
             raise ValueError(f"Unknown device: {device}")
     
-    def zero_grad(self):
+    def zero_grad(self) -> None:
         """Zero out gradients of all parameters."""
         for param in self.parameters():
             param.grad = None

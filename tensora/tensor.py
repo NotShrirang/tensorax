@@ -3,13 +3,18 @@ Core Tensor class for Tensora library.
 Pure C++/CUDA backend - no NumPy dependency.
 """
 
-from typing import Union, Tuple, Optional, List
+from typing import Iterable, Union, Tuple, Optional, List
+import warnings
+
 try:
     from . import _C
-except ImportError:
+except ImportError as e:
+    warnings.warn(f"Failed to import _C module: {e}. Tensor operations will not work until the package is built.")
     _C = None  # Will be available after building
 
+import tensora as ts
 from tensora.utils.type_checks import is_numpy_array
+from tensora.utils.shape_utils import _compute_size, _has_valid_shape
 
 class Tensor:
     """
@@ -25,7 +30,7 @@ class Tensor:
         dtype: Optional[str] = None,
         device: str = 'cpu',
         requires_grad: bool = False
-    ):
+    ) -> None:
         """
         Initialize a Tensor.
         
@@ -36,6 +41,16 @@ class Tensor:
             device: Device to place tensor on ('cpu' or 'cuda')
             requires_grad: Whether to track gradients
         """
+        # Validate device before doing anything else
+        if device not in (ts.cpu, ts.cuda):
+            raise ValueError(f"Unknown device: {device}")
+        
+        if dtype is not None and dtype not in ts.valid_tensor_dtypes:
+            raise ValueError(f"Invalid dtype: {dtype}. Must be one of {ts.valid_tensor_dtypes}")
+        
+        if shape is None and not _has_valid_shape(data):
+            raise ValueError("Cannot infer shape from data: inconsistent nested list lengths. Either provide a valid shape or ensure data is a well-formed nested list.")
+
         self.dtype = dtype or 'float32'
         self.device = device
         self.requires_grad = requires_grad
@@ -46,19 +61,28 @@ class Tensor:
             # Copy from another tensor
             self._shape = data._shape
             self._size = data._size
+            self.dtype = data.dtype
+            self.device = data.device
+            self.requires_grad = data.requires_grad
             self._c_tensor = _C.copy_tensor(data._c_tensor) if _C else None
         else:
             # Create from list/data
             flat_data, inferred_shape = self._flatten_data(data)
+            if shape is not None:
+                size = _compute_size(shape)
+                if size != len(flat_data):
+                    raise ValueError(f"Data size {len(flat_data)} does not match provided shape {shape} (size {size})")
             self._shape = shape or inferred_shape
             self._size = self._compute_size(self._shape)
             
             # Create C++ tensor
             if _C:
-                if device == 'cpu':
+                if device == ts.cpu:
                     self._c_tensor = _C.create_tensor_cpu(flat_data, list(self._shape), self.dtype)
-                else:
+                elif device == ts.cuda:
                     self._c_tensor = _C.create_tensor_cuda(flat_data, list(self._shape), self.dtype)
+                else:
+                    raise ValueError(f"Unknown device: {device}")
             else:
                 self._c_tensor = None
                 self._data = flat_data  # Fallback for testing before build
@@ -93,10 +117,7 @@ class Tensor:
     @staticmethod
     def _compute_size(shape):
         """Compute total number of elements."""
-        size = 1
-        for dim in shape:
-            size *= dim
-        return size
+        return _compute_size(shape)
     
     @property
     def shape(self) -> Tuple[int, ...]:
@@ -186,7 +207,7 @@ class Tensor:
         else:
             raise ValueError(f"Unknown device: {device}")
     
-    def __add__(self, other: Union['Tensor', float]) -> 'Tensor':
+    def __add__(self, other: Union['Tensor', float, int]) -> 'Tensor':
         """Element-wise addition."""
         if isinstance(other, (int, float)):
             other = Tensor.full(self._shape, other, dtype=self.dtype, device=self.device)
@@ -239,6 +260,10 @@ class Tensor:
         
         return result
     
+    def __radd__(self, other: Union['Tensor', float, int]) -> 'Tensor':
+        """Right-hand element-wise addition."""
+        return self.__add__(other)
+
     def __mul__(self, other: Union['Tensor', float]) -> 'Tensor':
         """Element-wise multiplication."""
         if isinstance(other, (int, float)):
@@ -370,7 +395,7 @@ class Tensor:
         result.grad = None
         
         if _C:
-            result._c_tensor = _C.power(self._c_tensor, float(power))
+            result._c_tensor = _C.pow(self._c_tensor, float(power))
         
         if self.requires_grad:
             result.requires_grad = True
@@ -497,6 +522,14 @@ class Tensor:
                 if x.requires_grad and output is not None:
                     grad_input = Tensor.ones(output.shape, device=output.device) - (output * output)
                     x.backward(grad * grad_input)
+            elif op == 'softmax':
+                # d(softmax)/dx = softmax(x) * (1 - softmax(x)) for each element
+                x, output, _ = inputs[0], inputs[1], inputs[2] if len(inputs) > 2 else None
+                if x.requires_grad and output is not None:
+                    # Create Jacobian-vector product for softmax gradient
+                    # For simplicity, we compute element-wise gradient
+                    grad_input = output * (Tensor.ones(output.shape, device=output.device) - output)
+                    x.backward(grad * grad_input)
             elif op == 'transpose':
                 # d(transpose)/dx = transpose(grad)
                 x = inputs[0]
@@ -538,6 +571,19 @@ class Tensor:
         if len(self._shape) == 0:
             raise TypeError("len() of a 0-d tensor")
         return self._shape[0]
+    
+    def __eq__(self, other: object) -> bool:
+        """Check equality of two tensors."""
+        if isinstance(other, Tensor):
+            if self._shape != other._shape or self.device != other.device or self.dtype != other.dtype:
+                return False
+            return self.tolist() == other.tolist()
+        elif is_numpy_array(other):
+            return self.tolist() == other.tolist()
+        elif isinstance(other, list):
+            return self.tolist() == other
+        else:
+            raise ValueError("Equality comparison only supported between Tensor objects")
     
     @property
     def T(self) -> 'Tensor':
@@ -581,6 +627,40 @@ class Tensor:
         if self.requires_grad:
             result.requires_grad = True
             result._grad_fn = ('sqrt', self, result)
+        else:
+            result.requires_grad = False
+            result._grad_fn = None
+        
+        return result
+
+    def sum(self, dim: Optional[int] = None) -> 'Tensor':
+        """Sum along specified dimension."""
+        if dim is not None and (dim < 0 or dim >= len(self._shape)):
+            raise ValueError(f"Dimension out of range (expected to be in range of [0, {len(self._shape)-1}], but got {dim})")
+        
+        result = Tensor.__new__(Tensor)
+        if dim is None:
+            # Sum all elements
+            result._shape = ()
+            result._size = 1
+        else:
+            # Sum along specified dimension
+            result_shape = list(self._shape)
+            del result_shape[dim]
+            result._shape = tuple(result_shape)
+            result._size = Tensor._compute_size(result._shape)
+        
+        result.dtype = self.dtype
+        result.device = self.device
+        result.grad = None
+        
+        if _C:
+            result._c_tensor = _C.sum(self._c_tensor, dim if dim is not None else -1)
+        
+        # Track gradient through sum
+        if self.requires_grad:
+            result.requires_grad = True
+            result._grad_fn = ('sum', self, dim)
         else:
             result.requires_grad = False
             result._grad_fn = None

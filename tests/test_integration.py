@@ -1,5 +1,6 @@
 import pytest
 import numpy as np
+import tensora as ts
 from tensora import Tensor, nn, optim
 
 
@@ -211,7 +212,7 @@ class TestIntegration:
         assert model.bias.device == 'cpu'
 
         # If CUDA is available, test device transfer
-        if Tensor.cuda_is_available():
+        if ts.cuda_is_available():
             model.cuda()
             x_cuda = x_cpu.cuda()
 

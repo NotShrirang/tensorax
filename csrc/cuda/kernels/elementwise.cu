@@ -3,7 +3,6 @@
 #include <vector>
 
 namespace tensora {
-namespace cuda {
 
 __global__ void add_kernel(const float* a, const float* b, float* out, int64_t size) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -93,7 +92,7 @@ __global__ void pow_kernel(const float* input, float* output, float power, int64
 void add_cuda(const float* a, const float* b, float* out, int64_t size) {
     dim3 grid = cuda::get_grid_size(size);
     dim3 block(cuda::BLOCK_SIZE);
-    cuda::add_kernel<<<grid, block>>>(a, b, out, size);
+    add_kernel<<<grid, block>>>(a, b, out, size);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 }
@@ -161,7 +160,7 @@ void broadcasting_add_cuda(const float* a, const float* b, float* out,
 
     dim3 grid = cuda::get_grid_size(size_out);
     dim3 block(cuda::BLOCK_SIZE);
-    cuda::broadcasting_add_kernel<<<grid, block>>>(a, b, out, d_stride_a, d_stride_b, d_stride_out, ndim_out, size_out);
+    broadcasting_add_kernel<<<grid, block>>>(a, b, out, d_stride_a, d_stride_b, d_stride_out, ndim_out, size_out);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -173,7 +172,7 @@ void broadcasting_add_cuda(const float* a, const float* b, float* out,
 void sub_cuda(const float* a, const float* b, float* out, int64_t size) {
     dim3 grid = cuda::get_grid_size(size);
     dim3 block(cuda::BLOCK_SIZE);
-    cuda::sub_kernel<<<grid, block>>>(a, b, out, size);
+    sub_kernel<<<grid, block>>>(a, b, out, size);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 }
@@ -181,7 +180,7 @@ void sub_cuda(const float* a, const float* b, float* out, int64_t size) {
 void mul_cuda(const float* a, const float* b, float* out, int64_t size) {
     dim3 grid = cuda::get_grid_size(size);
     dim3 block(cuda::BLOCK_SIZE);
-    cuda::mul_kernel<<<grid, block>>>(a, b, out, size);
+    mul_kernel<<<grid, block>>>(a, b, out, size);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 }
@@ -189,7 +188,7 @@ void mul_cuda(const float* a, const float* b, float* out, int64_t size) {
 void div_cuda(const float* a, const float* b, float* out, int64_t size) {
     dim3 grid = cuda::get_grid_size(size);
     dim3 block(cuda::BLOCK_SIZE);
-    cuda::div_kernel<<<grid, block>>>(a, b, out, size);
+    div_kernel<<<grid, block>>>(a, b, out, size);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 }
@@ -197,7 +196,7 @@ void div_cuda(const float* a, const float* b, float* out, int64_t size) {
 void relu_cuda(const float* in, float* out, int64_t size) {
     dim3 grid = cuda::get_grid_size(size);
     dim3 block(cuda::BLOCK_SIZE);
-    cuda::relu_kernel<<<grid, block>>>(in, out, size);
+    relu_kernel<<<grid, block>>>(in, out, size);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 }
@@ -205,7 +204,7 @@ void relu_cuda(const float* in, float* out, int64_t size) {
 void sigmoid_cuda(const float* in, float* out, int64_t size) {
     dim3 grid = cuda::get_grid_size(size);
     dim3 block(cuda::BLOCK_SIZE);
-    cuda::sigmoid_kernel<<<grid, block>>>(in, out, size);
+    sigmoid_kernel<<<grid, block>>>(in, out, size);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 }
@@ -213,7 +212,7 @@ void sigmoid_cuda(const float* in, float* out, int64_t size) {
 void tanh_cuda(const float* in, float* out, int64_t size) {
     dim3 grid = cuda::get_grid_size(size);
     dim3 block(cuda::BLOCK_SIZE);
-    cuda::tanh_kernel<<<grid, block>>>(in, out, size);
+    tanh_kernel<<<grid, block>>>(in, out, size);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 }
@@ -221,7 +220,7 @@ void tanh_cuda(const float* in, float* out, int64_t size) {
 void sqrt_cuda(const float* in, float* out, int64_t size) {
     dim3 grid = cuda::get_grid_size(size);
     dim3 block(cuda::BLOCK_SIZE);
-    cuda::sqrt_kernel<<<grid, block>>>(in, out, size);
+    sqrt_kernel<<<grid, block>>>(in, out, size);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 }
@@ -229,10 +228,19 @@ void sqrt_cuda(const float* in, float* out, int64_t size) {
 void pow_cuda(const float* in, float* out, float power, int64_t size) {
     dim3 grid = cuda::get_grid_size(size);
     dim3 block(cuda::BLOCK_SIZE);
-    cuda::pow_kernel<<<grid, block>>>(in, out, power, size);
+    pow_kernel<<<grid, block>>>(in, out, power, size);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+void sum_cuda(const float* in, float* out, const std::vector<int64_t> &shape, int64_t dim) {
+    // Placeholder for sum implementation on CUDA
+    // Actual implementation would involve reduction kernels
+    dim3 grid = cuda::get_grid_size(shape[dim]);
+    dim3 block(cuda::BLOCK_SIZE);
+    sqrt_kernel<<<grid, block>>>(in, out, shape[dim]); // Dummy kernel call
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
 } // namespace tensora
-}

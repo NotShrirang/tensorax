@@ -225,24 +225,35 @@ namespace tensora
     // Matrix operations
     TensorHandle matmul(const TensorHandle &a, const TensorHandle &b)
     {
-        // Assuming 2D matrices for now: A(m,k) @ B(k,n) = C(m,n)
+        // Handle nD matrices: A: (..., m, k), B: (..., k, n) -> C: (..., m, n)
         int64_t m = a->shape[a->shape.size() - 2];
         int64_t k = a->shape[a->shape.size() - 1];
         int64_t n = b->shape[b->shape.size() - 1];
 
+        // Calculate batch size (product of all dimensions except last two)
+        int64_t batch_size = 1;
+        for (size_t i = 0; i < a->shape.size() - 2; ++i)
+        {
+            batch_size *= a->shape[i];
+        }
+
+        // Result shape: same as a's shape but with last dimension replaced by n
         std::vector<int64_t> result_shape = a->shape;
         result_shape[result_shape.size() - 1] = n;
 
-        auto result = std::make_shared<TensorImpl>(std::vector<float>(m * n),
+        // Calculate total result size
+        int64_t result_size = batch_size * m * n;
+
+        auto result = std::make_shared<TensorImpl>(std::vector<float>(result_size),
                                                    result_shape, a->dtype, a->device);
         if (a->device == "cpu")
         {
-            matmul_cpu(a->data, b->data, result->data, m, n, k);
+            matmul_cpu(a->data, b->data, result->data, batch_size, m, n, k);
         }
         else
         {
 #ifdef WITH_CUDA
-            matmul_cuda(a->data, b->data, result->data, m, n, k);
+            matmul_cuda(a->data, b->data, result->data, batch_size, m, n, k);
 #endif
         }
         return result;
@@ -250,25 +261,113 @@ namespace tensora
 
     TensorHandle transpose(const TensorHandle &a)
     {
-        // Transpose last two dimensions
+        // Transpose last two dimensions for n-dimensional tensors
         auto result_shape = a->shape;
         std::swap(result_shape[result_shape.size() - 2], result_shape[result_shape.size() - 1]);
 
         auto result = std::make_shared<TensorImpl>(std::vector<float>(a->size),
                                                    result_shape, a->dtype, a->device);
 
-        // Simple transpose for 2D matrices
         int64_t rows = a->shape[a->shape.size() - 2];
         int64_t cols = a->shape[a->shape.size() - 1];
 
-        for (int64_t i = 0; i < rows; ++i)
+        // Calculate batch size (product of all dimensions except last two)
+        int64_t batch_size = 1;
+        for (size_t i = 0; i < a->shape.size() - 2; ++i)
         {
-            for (int64_t j = 0; j < cols; ++j)
+            batch_size *= a->shape[i];
+        }
+
+        int64_t matrix_size = rows * cols;
+
+        // Transpose each matrix in the batch
+        for (int64_t batch = 0; batch < batch_size; ++batch)
+        {
+            for (int64_t i = 0; i < rows; ++i)
             {
-                result->data[j * rows + i] = a->data[i * cols + j];
+                for (int64_t j = 0; j < cols; ++j)
+                {
+                    result->data[batch * matrix_size + j * rows + i] =
+                        a->data[batch * matrix_size + i * cols + j];
+                }
             }
         }
 
+        return result;
+    }
+
+    TensorHandle sqrt_op(const TensorHandle &x)
+    {
+        auto result = std::make_shared<TensorImpl>(std::vector<float>(x->size),
+                                                   x->shape, x->dtype, x->device);
+        if (x->device == "cpu")
+        {
+            sqrt_cpu(x->data, result->data, x->size);
+        }
+        else
+        {
+#ifdef WITH_CUDA
+            sqrt_cuda(x->data, result->data, x->size);
+#endif
+        }
+        return result;
+    }
+
+    TensorHandle pow_op(const TensorHandle &x, float power)
+    {
+        auto result = std::make_shared<TensorImpl>(std::vector<float>(x->size),
+                                                   x->shape, x->dtype, x->device);
+        if (x->device == "cpu")
+        {
+            pow_cpu(x->data, result->data, power, x->size);
+        }
+        else
+        {
+#ifdef WITH_CUDA
+            pow_cuda(x->data, result->data, power, x->size);
+#endif
+        }
+        return result;
+    }
+
+    TensorHandle sum(const TensorHandle &x, int64_t dim)
+    {
+        // Simplified sum over a single dimension
+        std::vector<int64_t> result_shape;
+        int64_t result_size;
+
+        if (dim == -1)
+        {
+            // Sum all elements - result is a scalar
+            result_shape = {}; // Empty shape for scalar
+            result_size = 1;
+        }
+        else
+        {
+            // Sum over specified dimension
+            result_shape = x->shape;
+            result_shape.erase(result_shape.begin() + dim);
+
+            result_size = 1;
+            for (auto dim_size : result_shape)
+            {
+                result_size *= dim_size;
+            }
+        }
+
+        auto result = std::make_shared<TensorImpl>(std::vector<float>(result_size),
+                                                   result_shape, x->dtype, x->device);
+
+        if (x->device == "cpu")
+        {
+            sum_cpu(x->data, result->data, x->shape, dim);
+        }
+        else
+        {
+#ifdef WITH_CUDA
+            sum_cuda(x->data, result->data, x->shape, dim);
+#endif
+        }
         return result;
     }
 
@@ -324,76 +423,15 @@ namespace tensora
         return result;
     }
 
-    TensorHandle sqrt_op(const TensorHandle &x)
-    {
-        auto result = std::make_shared<TensorImpl>(std::vector<float>(x->size),
-                                                   x->shape, x->dtype, x->device);
-        if (x->device == "cpu")
-        {
-            sqrt_cpu(x->data, result->data, x->size);
-        }
-        else
-        {
-#ifdef WITH_CUDA
-            sqrt_cuda(x->data, result->data, x->size);
-#endif
-        }
-        return result;
-    }
-
-    TensorHandle pow_op(const TensorHandle &x, float power)
-    {
-        auto result = std::make_shared<TensorImpl>(std::vector<float>(x->size),
-                                                   x->shape, x->dtype, x->device);
-        if (x->device == "cpu")
-        {
-            pow_cpu(x->data, result->data, power, x->size);
-        }
-        else
-        {
-#ifdef WITH_CUDA
-            pow_cuda(x->data, result->data, power, x->size);
-#endif
-        }
-        return result;
-    }
-
     TensorHandle softmax(const TensorHandle &x, int64_t dim)
     {
         // Simplified softmax for last dimension
-        auto result = std::make_shared<TensorImpl>(std::vector<float>(x->size),
-                                                   x->shape, x->dtype, x->device);
+        auto result = std::make_shared<TensorImpl>(std::vector<float>(x->size), x->shape, x->dtype, x->device);
 
         // CPU implementation
         if (x->device == "cpu")
         {
-            int64_t outer = 1;
-            for (size_t i = 0; i < x->shape.size() - 1; ++i)
-            {
-                outer *= x->shape[i];
-            }
-            int64_t inner = x->shape[x->shape.size() - 1];
-
-            for (int64_t i = 0; i < outer; ++i)
-            {
-                float max_val = x->data[i * inner];
-                for (int64_t j = 1; j < inner; ++j)
-                {
-                    max_val = std::max(max_val, x->data[i * inner + j]);
-                }
-
-                float sum = 0.0f;
-                for (int64_t j = 0; j < inner; ++j)
-                {
-                    result->data[i * inner + j] = std::exp(x->data[i * inner + j] - max_val);
-                    sum += result->data[i * inner + j];
-                }
-
-                for (int64_t j = 0; j < inner; ++j)
-                {
-                    result->data[i * inner + j] /= sum;
-                }
-            }
+            softmax_cpu(x->data, result->data, x->shape, dim);
         }
 
         return result;
@@ -493,14 +531,15 @@ PYBIND11_MODULE(_C, m)
     m.def("divide", &tensora::divide);
     m.def("matmul", &tensora::matmul);
     m.def("transpose", &tensora::transpose);
+    m.def("sqrt", &tensora::sqrt_op);
+    m.def("pow", &tensora::pow_op);
+    m.def("sum", &tensora::sum);
 
     // Activations
     m.def("relu", &tensora::relu);
     m.def("sigmoid", &tensora::sigmoid);
     m.def("tanh", &tensora::tanh_op);
     m.def("softmax", &tensora::softmax);
-    m.def("sqrt", &tensora::sqrt_op);
-    m.def("pow", &tensora::pow_op);
 
     // Losses
     m.def("mse_loss", &tensora::mse_loss);

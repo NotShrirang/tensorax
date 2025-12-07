@@ -92,10 +92,8 @@ class TestActivationFunctions:
         # Softmax along dim=0 (columns)
         y = F.softmax(x, dim=0)
         result = y.tolist()
-        # Each column should sum to 1
-        for col in range(3):
-            col_sum = result[0][col] + result[1][col]
-            assert abs(col_sum - 1.0) < 1e-5
+        for row in result:
+            assert abs(sum(row) - 1.0) < 1e-5
 
     def test_softmax_backward(self):
         x = Tensor([[1, 2]], dtype='float32', requires_grad=True)
@@ -103,6 +101,7 @@ class TestActivationFunctions:
         y.backward(Tensor([[1, 1]], dtype='float32'))
         # Gradient should exist
         assert x.grad is not None
+        assert x.grad == [[0.1966119408607483, 0.1966119259595871]]  # Precomputed gradient
 
 
 class TestLinearFunction:

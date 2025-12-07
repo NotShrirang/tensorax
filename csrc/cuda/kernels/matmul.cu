@@ -2,7 +2,6 @@
 #include "../tensor_ops.h"
 
 namespace tensora {
-namespace cuda {
 
 // Simple matrix multiplication kernel (naive implementation)
 __global__ void matmul_kernel_naive(const float* a, const float* b, float* c,
@@ -22,6 +21,7 @@ __global__ void matmul_kernel_naive(const float* a, const float* b, float* c,
 // Tiled matrix multiplication kernel (optimized)
 __global__ void matmul_kernel_tiled(const float* a, const float* b, float* c,
                                      int64_t m, int64_t n, int64_t k) {
+    constexpr int TILE_SIZE = cuda::TILE_SIZE;
     __shared__ float tile_a[TILE_SIZE][TILE_SIZE];
     __shared__ float tile_b[TILE_SIZE][TILE_SIZE];
     
@@ -62,17 +62,27 @@ __global__ void matmul_kernel_tiled(const float* a, const float* b, float* c,
     }
 }
 
-} // namespace cuda
-
-// Host-side wrapper
+// Host-side wrapper for batched matrix multiplication
 void matmul_cuda(const float* a, const float* b, float* c,
-                 int64_t m, int64_t n, int64_t k) {
+                 int64_t batch_size, int64_t m, int64_t n, int64_t k) {
     // Use tiled kernel for better performance
     dim3 block(cuda::TILE_SIZE, cuda::TILE_SIZE);
     dim3 grid((n + cuda::TILE_SIZE - 1) / cuda::TILE_SIZE,
               (m + cuda::TILE_SIZE - 1) / cuda::TILE_SIZE);
     
-    cuda::matmul_kernel_tiled<<<grid, block>>>(a, b, c, m, n, k);
+    int64_t matrix_size_a = m * k;
+    int64_t matrix_size_b = k * n;
+    int64_t matrix_size_c = m * n;
+    
+    // Process each batch
+    for (int64_t batch = 0; batch < batch_size; ++batch) {
+        const float* a_batch = a + batch * matrix_size_a;
+        const float* b_batch = b + batch * matrix_size_b;
+        float* c_batch = c + batch * matrix_size_c;
+        
+        matmul_kernel_tiled<<<grid, block>>>(a_batch, b_batch, c_batch, m, n, k);
+    }
+    
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 }

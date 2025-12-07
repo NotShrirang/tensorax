@@ -6,6 +6,7 @@ __pycache__/
 # C extensions
 *.so
 *.o
+*.out
 
 # Distribution / packaging
 .Python
@@ -48,6 +49,9 @@ coverage.xml
 *.cover
 *.py,cover
 .hypothesis/
+
+# Development roadmap and planning
+ROADMAP.md
 .pytest_cache/
 
 # Translations
@@ -141,4 +145,6 @@ dmypy.json
 
 # Temporary files
 temp.py
+*temp*.*
 *.tmp
+

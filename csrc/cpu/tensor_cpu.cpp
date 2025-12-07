@@ -1,6 +1,7 @@
 #include "../tensor_ops.h"
 #include <cmath>
 #include <algorithm>
+#include <stdexcept>
 
 namespace tensora
 {
@@ -124,20 +125,31 @@ namespace tensora
     }
 
     // Matrix multiplication: C = A @ B
-    // A: (m x k), B: (k x n), C: (m x n)
+    // A: (..., m, k), B: (..., k, n), C: (..., m, n)
+    // Handles batched matrix multiplication for n-dimensional tensors
     void matmul_cpu(const float *a, const float *b, float *out,
-                    int64_t m, int64_t n, int64_t k)
+                    int64_t batch_size, int64_t m, int64_t n, int64_t k)
     {
-        for (int64_t i = 0; i < m; ++i)
+        int64_t matrix_size_a = m * k;
+        int64_t matrix_size_b = k * n;
+        int64_t matrix_size_out = m * n;
+
+        for (int64_t batch = 0; batch < batch_size; ++batch)
         {
-            for (int64_t j = 0; j < n; ++j)
+            const float *a_batch = a + batch * matrix_size_a;
+            const float *b_batch = b + batch * matrix_size_b;
+            float *out_batch = out + batch * matrix_size_out;
+
+            for (int64_t i = 0; i < m; ++i)
             {
-                float sum = 0.0f;
-                for (int64_t p = 0; p < k; ++p)
+                for (int64_t j = 0; j < n; ++j)
                 {
-                    sum += a[i * k + p] * b[p * n + j];
+                    out_batch[i * n + j] = 0.0f;
+                    for (int64_t p = 0; p < k; ++p)
+                    {
+                        out_batch[i * n + j] += a_batch[i * k + p] * b_batch[p * n + j];
+                    }
                 }
-                out[i * n + j] = sum;
             }
         }
     }
@@ -167,6 +179,62 @@ namespace tensora
         }
     }
 
+    void softmax_cpu(const float *in, float *out, const std::vector<int64_t> &shape, int64_t dim)
+    {
+        if (dim == -1)
+        {
+            dim = shape.size() - 1;
+        }
+        int64_t ndim = shape.size();
+        if (ndim <= dim)
+        {
+            throw std::runtime_error("Dimension out of range for softmax");
+        }
+        const int64_t stride = shape[dim];
+        int64_t outer_size = 1;
+        for (int64_t i = 0; i < dim; ++i)
+        {
+            outer_size *= shape[i];
+        }
+        int64_t inner_size = 1;
+        for (int64_t i = dim + 1; i < ndim; ++i)
+        {
+            inner_size *= shape[i];
+        }
+        for (int64_t outer = 0; outer < outer_size; ++outer)
+        {
+            for (int64_t inner = 0; inner < inner_size; ++inner)
+            {
+                // Calculate Max value for numerical stability
+                float max_val = in[outer * stride * inner_size + inner];
+                for (int64_t i = 0; i < stride; ++i)
+                {
+                    float val = in[outer * stride * inner_size + inner + inner_size * i];
+                    if (val > max_val)
+                    {
+                        max_val = val;
+                    }
+                }
+
+                // Compute exponentials and sum
+                float sum = 0.0f;
+                for (int64_t j = 0; j < stride; ++j)
+                {
+                    out[outer * stride * inner_size + inner + inner_size * j] =
+                        std::exp(in[outer * stride * inner_size + inner + inner_size * j] - max_val);
+                    sum += out[outer * stride * inner_size + inner + inner_size * j];
+                }
+
+                // Compute softmax output
+                for (int64_t j = 0; j < stride; ++j)
+                {
+                    out[outer * stride * inner_size + inner + inner_size * j] =
+                        out[outer * stride * inner_size + inner + inner_size * j] / sum;
+                }
+            }
+        }
+    }
+
     void sqrt_cpu(const float *in, float *out, int64_t size)
     {
         for (int64_t i = 0; i < size; ++i)
@@ -180,6 +248,101 @@ namespace tensora
         for (int64_t i = 0; i < size; ++i)
         {
             out[i] = std::pow(in[i], power);
+        }
+    }
+
+    void sum_cpu(const float *in, float *out, const std::vector<int64_t> &shape, int64_t dim)
+    {
+        // Sum over the specified dimension
+        if (dim == -1)
+        {
+            // Sum all elements
+            float total = 0.0f;
+            int64_t size = 1;
+            for (auto s : shape)
+            {
+                size *= s;
+            }
+            for (int64_t i = 0; i < size; ++i)
+            {
+                total += in[i];
+            }
+            out[0] = total;
+        }
+        else
+        {
+            // Sum over specified dimension
+            int64_t ndim = shape.size();
+
+            // Calculate strides for input tensor
+            std::vector<int64_t> strides(ndim, 1);
+            for (int64_t i = ndim - 2; i >= 0; --i)
+            {
+                strides[i] = strides[i + 1] * shape[i + 1];
+            }
+
+            // Calculate output shape and strides
+            std::vector<int64_t> out_shape;
+            for (int64_t i = 0; i < ndim; ++i)
+            {
+                if (i != dim)
+                {
+                    out_shape.push_back(shape[i]);
+                }
+            }
+
+            int64_t out_ndim = out_shape.size();
+            std::vector<int64_t> out_strides(out_ndim > 0 ? out_ndim : 1, 1);
+            for (int64_t i = out_ndim - 2; i >= 0; --i)
+            {
+                out_strides[i] = out_strides[i + 1] * out_shape[i + 1];
+            }
+
+            int64_t out_size = 1;
+            for (auto s : out_shape)
+            {
+                out_size *= s;
+            }
+
+            // Initialize output to zero
+            for (int64_t i = 0; i < out_size; ++i)
+            {
+                out[i] = 0.0f;
+            }
+
+            // Calculate total input size
+            int64_t total_size = 1;
+            for (auto s : shape)
+            {
+                total_size *= s;
+            }
+
+            // Sum along the specified dimension
+            for (int64_t idx = 0; idx < total_size; ++idx)
+            {
+                // Convert linear index to multi-dimensional coordinates
+                std::vector<int64_t> coords(ndim);
+                int64_t remaining = idx;
+                for (int64_t i = 0; i < ndim; ++i)
+                {
+                    coords[i] = remaining / strides[i];
+                    remaining = remaining % strides[i];
+                }
+
+                // Calculate output index by removing the summed dimension coordinate
+                int64_t out_idx = 0;
+                int64_t out_dim_idx = 0;
+                for (int64_t i = 0; i < ndim; ++i)
+                {
+                    if (i != dim)
+                    {
+                        out_idx += coords[i] * out_strides[out_dim_idx];
+                        out_dim_idx++;
+                    }
+                }
+
+                out[out_idx] += in[idx];
+            }
         }
     }
 
