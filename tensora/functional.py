@@ -121,6 +121,10 @@ def max_pool2d(x: Tensor, kernel_size: int, stride: int = None) -> Tensor:
 
 def mse_loss(pred: Tensor, target: Tensor) -> Tensor:
     """Mean squared error loss."""
+
+    if pred._shape != target._shape:
+        raise RuntimeError(f"MSE Loss: Shape mismatch between pred {pred._shape} and target {target._shape}. Tensora does not support broadcasting in loss functions.")
+
     result = Tensor.__new__(Tensor)
     result._shape = ()  # Scalar
     result._size = 1
@@ -142,7 +146,7 @@ def mse_loss(pred: Tensor, target: Tensor) -> Tensor:
 
 
 def cross_entropy_loss(pred: Tensor, target: Tensor) -> Tensor:
-    """Cross entropy loss."""
+    """Cross entropy loss (expects softmax probabilities and one-hot targets)."""
     result = Tensor.__new__(Tensor)
     result._shape = ()  # Scalar
     result._size = 1
@@ -156,6 +160,54 @@ def cross_entropy_loss(pred: Tensor, target: Tensor) -> Tensor:
     if pred.requires_grad:
         result.requires_grad = True
         result._grad_fn = ('cross_entropy', pred, target)
+    else:
+        result.requires_grad = False
+        result._grad_fn = None
+    
+    return result
+
+
+def cross_entropy_from_logits(logits: Tensor, targets: Tensor, reduce_mean: bool = True) -> Tensor:
+    """
+    Cross entropy loss from raw logits (more numerically stable).
+    
+    Args:
+        logits: Raw predictions before softmax. Shape: (batch_size, num_classes) or (num_classes,)
+        targets: Class indices. Shape: (batch_size,) or scalar
+        reduce_mean: If True, returns mean loss. If False, returns per-sample losses.
+    
+    Returns:
+        Loss tensor (scalar if reduce_mean=True, else (batch_size,))
+    
+    Example:
+        >>> logits = Tensor([[2.0, 1.0, 0.1], [0.5, 2.5, 0.0]])  # batch_size=2, num_classes=3
+        >>> targets = Tensor([0, 1])  # class indices
+        >>> loss = F.cross_entropy_from_logits(logits, targets)
+    """
+    result = Tensor.__new__(Tensor)
+    
+    if _C:
+        result._c_tensor = _C.cross_entropy_from_logits(logits._c_tensor, targets._c_tensor, reduce_mean)
+    
+    if reduce_mean:
+        result._shape = ()  # Scalar
+        result._size = 1
+    else:
+        # Per-sample losses
+        if len(logits._shape) == 1:
+            result._shape = ()
+            result._size = 1
+        else:
+            result._shape = (logits._shape[0],)
+            result._size = logits._shape[0]
+    
+    result.dtype = logits.dtype
+    result.device = logits.device
+    result.grad = None
+    
+    if logits.requires_grad:
+        result.requires_grad = True
+        result._grad_fn = ('cross_entropy_from_logits', logits, targets, reduce_mean)
     else:
         result.requires_grad = False
         result._grad_fn = None

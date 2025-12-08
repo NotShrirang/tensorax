@@ -181,9 +181,9 @@ namespace tensora
 
     void softmax_cpu(const float *in, float *out, const std::vector<int64_t> &shape, int64_t dim)
     {
-        if (dim == -1)
+        if (dim < 0)
         {
-            dim = shape.size() - 1;
+            dim = shape.size() + dim;
         }
         int64_t ndim = shape.size();
         if (ndim <= dim)
@@ -241,6 +241,66 @@ namespace tensora
         {
             out[i] = std::sqrt(in[i]);
         }
+    }
+
+    void cross_entropy_loss_cpu(const float *pred, const float *target, float &loss, int64_t size)
+    {
+        float sum = 0.0f;
+        for (int64_t i = 0; i < size; ++i)
+        {
+            float p = std::max(pred[i], 1e-12f); // prevent log(0)
+            sum += target[i] * std::log(p);
+        }
+        loss = -sum;
+    }
+
+    // Cross entropy from logits for a single sample
+    // More numerically stable than applying softmax then cross_entropy
+    float cross_entropy_from_logits_single(const float *logits, int class_index, int64_t num_classes)
+    {
+        // Compute log-softmax using logsumexp trick for numerical stability
+        float max_logit = logits[0];
+        for (int64_t i = 1; i < num_classes; ++i)
+            max_logit = std::max(max_logit, logits[i]);
+
+        float sum = 0.0f;
+        for (int64_t i = 0; i < num_classes; ++i)
+            sum += std::exp(logits[i] - max_logit);
+
+        float log_softmax = logits[class_index] - max_logit - std::log(sum);
+
+        return -log_softmax;
+    }
+
+    // Cross entropy from logits for batched data
+    // logits: (batch_size, num_classes)
+    // targets: (batch_size,) containing class indices
+    void cross_entropy_from_logits_cpu(const float *logits, const int64_t *targets,
+                                       float *losses, int64_t batch_size, int64_t num_classes)
+    {
+        for (int64_t batch = 0; batch < batch_size; ++batch)
+        {
+            const float *batch_logits = logits + batch * num_classes;
+            int64_t target_class = targets[batch];
+
+            if (target_class < 0 || target_class >= num_classes)
+            {
+                throw std::runtime_error("Target class index out of bounds");
+            }
+
+            losses[batch] = cross_entropy_from_logits_single(batch_logits, target_class, num_classes);
+        }
+    }
+
+    void mse_loss_cpu(const float *pred, const float *target, float &loss, int64_t size)
+    {
+        float sum = 0.0f;
+        for (int64_t i = 0; i < size; ++i)
+        {
+            float diff = pred[i] - target[i];
+            sum += diff * diff;
+        }
+        loss = sum / size;
     }
 
     void pow_cpu(const float *in, float *out, float power, int64_t size)

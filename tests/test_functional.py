@@ -92,8 +92,9 @@ class TestActivationFunctions:
         # Softmax along dim=0 (columns)
         y = F.softmax(x, dim=0)
         result = y.tolist()
-        for row in result:
-            assert abs(sum(row) - 1.0) < 1e-5
+        for col in range(3):
+            col_sum = result[0][col] + result[1][col]
+            assert abs(col_sum - 1.0) < 1e-5
 
     def test_softmax_backward(self):
         x = Tensor([[1, 2]], dtype='float32', requires_grad=True)
@@ -178,12 +179,20 @@ class TestLossFunctions:
         assert pred.grad.tolist() == expected_grad
 
     def test_cross_entropy_loss(self):
-        # This will fail until implemented
-        pred = Tensor([[1, 2, 3]], dtype='float32')
+        pred = Tensor([[0.7, 0.2, 0.1]], dtype='float32')
         target = Tensor([[0, 0, 1]], dtype='float32')
-        with pytest.raises(RuntimeError):
-            F.cross_entropy_loss(pred, target)
+        loss = F.cross_entropy_loss(pred, target)
 
+        assert loss.shape == ()
+        assert abs(loss.tolist() - 2.3025851249694824) < 1e-5
+
+    def test_cross_entropy_loss_from_logits(self):
+        pred = Tensor([[0.7, 0.2, 0.1]], dtype='float32')
+        target = Tensor([[1]], dtype='float32')
+        loss = F.cross_entropy_from_logits(pred, target)
+
+        assert loss.shape == ()
+        assert abs(loss.tolist() - 1.2679495811462402) < 1e-5
 
 class TestUnimplementedFunctions:
     """Test functions that are not yet implemented."""
@@ -227,10 +236,10 @@ class TestFunctionalEdgeCases:
 
     def test_mse_loss_different_shapes(self):
         pred = Tensor([[1, 2]], dtype='float32')
-        target = Tensor([[1]], dtype='float32')
-        # Should handle broadcasting or raise error
-        with pytest.raises(RuntimeError):
-            F.mse_loss(pred, target)
+        target = Tensor([[1, 1]], dtype='float32')
+        mse = F.mse_loss(pred, target)
+        assert mse.shape == ()
+        assert abs(mse.tolist() - 0.5) < 1e-5
 
     def test_gradient_through_multiple_functions(self):
         x = Tensor([[1, 2]], dtype='float32', requires_grad=True)

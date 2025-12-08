@@ -59,6 +59,8 @@ namespace tensora
 
     TensorHandle mse_loss(const TensorHandle &pred, const TensorHandle &target);
     TensorHandle cross_entropy_loss(const TensorHandle &pred, const TensorHandle &target);
+    TensorHandle cross_entropy_from_logits(const TensorHandle &logits, const TensorHandle &targets, bool reduce_mean = true);
+    TensorHandle mse_loss(const TensorHandle &pred, const TensorHandle &target);
 
     TensorHandle randn(const std::vector<int64_t> &shape,
                        const std::string &dtype,
@@ -77,6 +79,10 @@ namespace tensora
     void matmul_cpu(const float *a, const float *b, float *out, int64_t batch_size, int64_t m, int64_t n, int64_t k);
     void relu_cpu(const float *in, float *out, int64_t size);
     void sigmoid_cpu(const float *in, float *out, int64_t size);
+    void cross_entropy_loss_cpu(const float *pred, const float *target, float &loss, int64_t size);
+    float cross_entropy_from_logits_single(const float *logits, int class_index, int64_t num_classes);
+    void cross_entropy_from_logits_cpu(const float *logits, const int64_t *targets, float *losses, int64_t batch_size, int64_t num_classes);
+    void mse_loss_cpu(const float *pred, const float *target, float &loss, int64_t size);
     void tanh_cpu(const float *in, float *out, int64_t size);
     void softmax_cpu(const float *in, float *out, const std::vector<int64_t> &shape, int64_t dim);
     void sqrt_cpu(const float *in, float *out, int64_t size);

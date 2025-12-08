@@ -440,38 +440,136 @@ namespace tensora
     // Loss functions
     TensorHandle mse_loss(const TensorHandle &pred, const TensorHandle &target)
     {
-        float sum = 0.0f;
-        std::vector<float> pred_data = pred->to_vector();
-        std::vector<float> target_data = target->to_vector();
-
-        for (size_t i = 0; i < pred_data.size(); ++i)
+        auto result = std::make_shared<TensorImpl>(std::vector<float>(1),
+                                                   std::vector<int64_t>{},
+                                                   pred->dtype, pred->device);
+        if (pred->device == "cpu")
         {
-            float diff = pred_data[i] - target_data[i];
-            sum += diff * diff;
+            mse_loss_cpu(pred->data, target->data, result->data[0], pred->size);
         }
-
-        float loss_val = sum / pred_data.size();
-        return std::make_shared<TensorImpl>(std::vector<float>{loss_val},
-                                            std::vector<int64_t>{},
-                                            pred->dtype, pred->device);
+        else
+        {
+#ifdef WITH_CUDA
+            // CUDA implementation would go here
+            throw std::runtime_error("CUDA MSE loss not implemented yet");
+#else
+            throw std::runtime_error("CUDA support not compiled");
+#endif
+        }
+        return result;
     }
 
     TensorHandle cross_entropy_loss(const TensorHandle &pred, const TensorHandle &target)
     {
         // Simplified cross entropy: -mean(sum(target * log(pred)))
-        float sum = 0.0f;
         std::vector<float> pred_data = pred->to_vector();
         std::vector<float> target_data = target->to_vector();
 
-        for (size_t i = 0; i < pred_data.size(); ++i)
+        if (pred_data.size() != target_data.size())
         {
-            sum -= target_data[i] * std::log(pred_data[i] + 1e-8f);
+            throw std::runtime_error("Pred and target must have the same size for cross entropy loss");
         }
 
-        float loss_val = sum / (pred->shape[0]); // Batch size
-        return std::make_shared<TensorImpl>(std::vector<float>{loss_val},
-                                            std::vector<int64_t>{},
-                                            pred->dtype, pred->device);
+        if (pred->device == "cpu")
+        {
+            TensorHandle result = std::make_shared<TensorImpl>(std::vector<float>(1),
+                                                               std::vector<int64_t>{},
+                                                               pred->dtype, pred->device);
+            cross_entropy_loss_cpu(pred->data, target->data, result->data[0], pred->size);
+            return result;
+        }
+        else if (pred->device == "cuda")
+        {
+#ifdef WITH_CUDA
+            // CUDA implementation would go here
+            throw std::runtime_error("CUDA cross entropy loss not implemented yet");
+#else
+            throw std::runtime_error("CUDA support not compiled");
+#endif
+        }
+        else
+        {
+            throw std::runtime_error("Unsupported device for cross entropy loss");
+        }
+    }
+
+    TensorHandle cross_entropy_from_logits(const TensorHandle &logits, const TensorHandle &targets, bool reduce_mean)
+    {
+        // logits: (batch_size, num_classes) or (num_classes,)
+        // targets: (batch_size,) or scalar containing class indices
+
+        if (logits->shape.size() < 1 || logits->shape.size() > 2)
+        {
+            throw std::runtime_error("Logits must be 1D (num_classes) or 2D (batch_size, num_classes)");
+        }
+
+        int64_t batch_size, num_classes;
+        if (logits->shape.size() == 1)
+        {
+            // Single sample case
+            batch_size = 1;
+            num_classes = logits->shape[0];
+        }
+        else
+        {
+            // Batched case
+            batch_size = logits->shape[0];
+            num_classes = logits->shape[1];
+        }
+
+        if (targets->size != batch_size)
+        {
+            throw std::runtime_error("Targets size must match batch size");
+        }
+
+        if (logits->device == "cpu")
+        {
+            // Convert targets to int64_t indices
+            std::vector<int64_t> target_indices(batch_size);
+            for (int64_t i = 0; i < batch_size; ++i)
+            {
+                target_indices[i] = static_cast<int64_t>(targets->data[i]);
+            }
+
+            // Compute loss for each sample
+            std::vector<float> losses(batch_size);
+            cross_entropy_from_logits_cpu(logits->data, target_indices.data(),
+                                          losses.data(), batch_size, num_classes);
+
+            if (reduce_mean)
+            {
+                // Return mean loss
+                float mean_loss = 0.0f;
+                for (float loss : losses)
+                {
+                    mean_loss += loss;
+                }
+                mean_loss /= batch_size;
+
+                return std::make_shared<TensorImpl>(std::vector<float>{mean_loss},
+                                                    std::vector<int64_t>{},
+                                                    logits->dtype, logits->device);
+            }
+            else
+            {
+                // Return individual losses
+                return std::make_shared<TensorImpl>(losses,
+                                                    std::vector<int64_t>{batch_size},
+                                                    logits->dtype, logits->device);
+            }
+        }
+        else if (logits->device == "cuda")
+        {
+#ifdef WITH_CUDA
+            throw std::runtime_error("CUDA cross_entropy_from_logits not implemented yet");
+#else
+            throw std::runtime_error("CUDA support not compiled");
+#endif
+        }
+        else
+        {
+            throw std::runtime_error("Unsupported device for cross_entropy_from_logits");
+        }
     }
 
     // Random tensor
@@ -544,6 +642,8 @@ PYBIND11_MODULE(_C, m)
     // Losses
     m.def("mse_loss", &tensora::mse_loss);
     m.def("cross_entropy_loss", &tensora::cross_entropy_loss);
+    m.def("cross_entropy_from_logits", &tensora::cross_entropy_from_logits,
+          py::arg("logits"), py::arg("targets"), py::arg("reduce_mean") = true);
 
     // Utility
     m.def("randn", &tensora::randn);
