@@ -123,12 +123,15 @@ class TestTensorProperties:
         tensor = Tensor([[1, 2], [3, 4]])
         repr_str = repr(tensor)
         assert 'Tensor' in repr_str
-        assert '(2, 2)' in repr_str
+        assert 'device=' in repr_str
+        assert 'dtype=' in repr_str
 
     def test_str(self):
         tensor = Tensor([[1, 2], [3, 4]])
         str_repr = str(tensor)
         assert 'Tensor' in str_repr
+        assert 'device=' in str_repr
+        assert 'dtype=' in str_repr
 
 
 class TestTensorOperations:
