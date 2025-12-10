@@ -35,6 +35,17 @@ Unlike other libraries that wrap PyTorch or depend on NumPy, Tensora is built **
 
 ## 📦 Installation
 
+### Platform Support
+
+**Currently supported:**
+
+- ✅ **Linux** (Ubuntu, Debian, Fedora, etc.)
+- ✅ **macOS** (Intel and Apple Silicon)
+
+**Not yet supported:**
+
+- ❌ **Windows** (coming soon - contributions welcome!)
+
 ### Prerequisites
 
 - Python 3.8+
