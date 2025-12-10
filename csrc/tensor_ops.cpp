@@ -395,8 +395,7 @@ namespace tensora
             }
         }
 
-        auto result = std::make_shared<TensorImpl>(std::vector<float>(result_size),
-                                                   result_shape, x->dtype, x->device);
+        auto result = std::make_shared<TensorImpl>(std::vector<float>(result_size), result_shape, x->dtype, x->device);
 
         if (x->device == "cpu")
         {

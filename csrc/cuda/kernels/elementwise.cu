@@ -248,6 +248,17 @@ namespace tensora {
     }
 
     void sum_cuda(const float* in, float* out, const std::vector<int64_t> &shape, int64_t dim) {
+        if (dim == -1) {
+            // Sum all elements
+            int64_t total_size = 1;
+            for (auto s : shape) {
+                total_size *= s;
+            }
+            // Use reduction kernel: treat as 1 output element, reducing over all input
+            reduce_sum_cuda(in, out, 1, total_size, 1, 1);
+            return;
+        }
+        
         int64_t reduce_size = shape[dim];
         int64_t output_size = 1;
         for (size_t i = 0; i < shape.size(); ++i) {
@@ -255,18 +266,49 @@ namespace tensora {
                 output_size *= shape[i];
             }
         }
-        reduce_sum_cuda(in, out, output_size, reduce_size);
+        
+        // Calculate inner_size: product of dimensions after dim
+        int64_t inner_size = 1;
+        for (size_t i = dim + 1; i < shape.size(); ++i) {
+            inner_size *= shape[i];
+        }
+        
+        // Stride is the size of elements to skip between consecutive elements along dim
+        int64_t stride = inner_size;
+        
+        reduce_sum_cuda(in, out, output_size, reduce_size, inner_size, stride);
     }
 
     void mean_cuda(const float* in, float* out, const std::vector<int64_t> &shape, int64_t dim) {
-        // Placeholder for mean implementation on CUDA
-        // Actual implementation would involve reduction kernels
-        dim3 grid = cuda::get_grid_size(shape[dim]);
-        dim3 block(cuda::BLOCK_SIZE);
-        sqrt_kernel<<<grid, block>>>(in, out, shape[dim]); // Dummy kernel call
-        CUDA_CHECK(cudaGetLastError());
-        CUDA_CHECK(cudaDeviceSynchronize());
-
+        if (dim == -1) {
+            // Mean of all elements
+            int64_t total_size = 1;
+            for (auto s : shape) {
+                total_size *= s;
+            }
+            // Use reduction kernel: treat as 1 output element, reducing over all input
+            reduce_mean_cuda(in, out, 1, total_size, 1, 1);
+            return;
+        }
+        
+        int64_t reduce_size = shape[dim];
+        int64_t output_size = 1;
+        for (size_t i = 0; i < shape.size(); ++i) {
+            if (i != static_cast<size_t>(dim)) {
+                output_size *= shape[i];
+            }
+        }
+        
+        // Calculate inner_size: product of dimensions after dim
+        int64_t inner_size = 1;
+        for (size_t i = dim + 1; i < shape.size(); ++i) {
+            inner_size *= shape[i];
+        }
+        
+        // Stride is the size of elements to skip between consecutive elements along dim
+        int64_t stride = inner_size;
+        
+        reduce_mean_cuda(in, out, output_size, reduce_size, inner_size, stride);
     }
 
     void log_cuda(const float* in, float* out, int64_t size) {

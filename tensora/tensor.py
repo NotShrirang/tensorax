@@ -378,12 +378,16 @@ class Tensor:
         return result
     
     def __repr__(self) -> str:
-        data_repr = self.tolist() if _C else "<not built>"
-        return f"Tensor({data_repr}, shape={self.shape}, device='{self.device}', dtype='{self.dtype}')"
+        data_list = self.tolist() if _C else "<not built>"
+        for _line in repr(data_list).splitlines():
+            data_repr = _line
+            break  # Just take the first line for brevity
+        data_repr = data_repr.replace('\n', ' ') + (' ...' if len(repr(data_list).splitlines()) > 1 else '')
+        
+        return f"Tensor({data_repr}, device='{self.device}', dtype='{self.dtype}')"
     
     def __str__(self) -> str:
-        data_repr = self.tolist() if _C else "<not built>"
-        return f"Tensor({data_repr})"
+        return self.__repr__()
 
     def __pow__(self, power: float) -> 'Tensor':
         """Element-wise power."""
@@ -708,6 +712,8 @@ class Tensor:
             raise ValueError(f"Dimension out of range (expected to be in range of [0, {len(self._shape)-1}], but got {dim})")
         
         result = Tensor.__new__(Tensor)
+        c_dim = -1 if dim is None else dim
+        
         if dim is None:
             # Sum all elements
             result._shape = ()
@@ -724,7 +730,7 @@ class Tensor:
         result.grad = None
         
         if _C:
-            result._c_tensor = _C.sum(self._c_tensor, dim if dim is not None else -1)
+            result._c_tensor = _C.sum(self._c_tensor, c_dim)
         
         # Track gradient through sum
         if self.requires_grad:
@@ -742,6 +748,8 @@ class Tensor:
             raise ValueError(f"Dimension out of range (expected to be in range of [0, {len(self._shape)-1}], but got {dim})")
         
         result = Tensor.__new__(Tensor)
+        c_dim = -1 if dim is None else dim
+        
         if dim is None:
             # Mean of all elements
             result._shape = ()
@@ -758,7 +766,7 @@ class Tensor:
         result.grad = None
         
         if _C:
-            result._c_tensor = _C.mean(self._c_tensor, dim if dim is not None else -1)
+            result._c_tensor = _C.mean(self._c_tensor, c_dim)
         
         # Track gradient through mean
         if self.requires_grad:
