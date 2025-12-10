@@ -14,16 +14,15 @@
     } while (0)
 
 namespace tensora {
-namespace cuda {
+    namespace cuda {
+        // Common CUDA configurations
+        constexpr int BLOCK_SIZE = 256;
+        constexpr int TILE_SIZE = 16;
+        constexpr int WARP_SIZE = 32;
 
-// Common CUDA configurations
-constexpr int BLOCK_SIZE = 256;
-constexpr int TILE_SIZE = 16;
-
-// Get optimal grid dimensions
-inline dim3 get_grid_size(int64_t n, int block_size = BLOCK_SIZE) {
-    return dim3((n + block_size - 1) / block_size);
-}
-
-} // namespace cuda
+        // Get optimal grid dimensions
+        inline dim3 get_grid_size(int64_t n, int block_size = BLOCK_SIZE) {
+            return dim3((n + block_size - 1) / block_size);
+        }
+    } // namespace cuda
 } // namespace tensora

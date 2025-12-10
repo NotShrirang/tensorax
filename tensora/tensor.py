@@ -352,8 +352,17 @@ class Tensor:
         
         return result
     
-    def __matmul__(self, other: 'Tensor') -> 'Tensor':
-        """Matrix multiplication."""
+    def matmul(self, other: 'Tensor', method: str = "default") -> 'Tensor':
+        """Matrix multiplication.
+        
+        Args:
+            other: Another tensor to multiply with
+            method: Method for CUDA matmul ('default', 'shared_memory_coalesced', 'tiled')
+
+        Returns:
+            Resulting tensor from matrix multiplication
+        """
+
         if self.device != other.device:
             raise RuntimeError(f"Tensors on different devices: {self.device} vs {other.device}")
         
@@ -362,7 +371,7 @@ class Tensor:
         
         if self._shape[-1] != other._shape[-2]:
             raise RuntimeError(f"Incompatible shapes for matmul: {self._shape} and {other._shape}. {self._shape[-1]} != {other._shape[-2]}")
-        # Result shape: (..., M, K) @ (..., K, N) -> (..., M, N)
+
         result_shape = self._shape[:-1] + (other._shape[-1],)
         
         result = Tensor.__new__(Tensor)
@@ -373,7 +382,57 @@ class Tensor:
         result.grad = None
         
         if _C:
-            result._c_tensor = _C.matmul(self._c_tensor, other._c_tensor)
+            result._c_tensor = self._matmul(self._c_tensor, other._c_tensor, method=method)
+        
+        if self.requires_grad or other.requires_grad:
+            result.requires_grad = True
+            result._grad_fn = ('matmul', self, other)
+        else:
+            result.requires_grad = False
+            result._grad_fn = None
+        
+        return result
+    
+    def _matmul(self, a_c_tensor, b_c_tensor, method: str = "default") -> 'Tensor':
+        """Internal method to perform matrix multiplication using C++ backend."""
+        if _C:
+            if self.device == 'cpu':
+                if method != "default":
+                    warnings.warn(f"Matrix multiplication method '{method}' not supported on CPU. Using default method.")
+                return _C.matmul(a_c_tensor, b_c_tensor)
+            elif self.device == 'cuda':
+                if method == "default":
+                    return _C.matmul(a_c_tensor, b_c_tensor)
+                elif method == "shared_memory_coalesced":
+                    return _C.matmul_with_shared_memory_coalescing(a_c_tensor, b_c_tensor, 1.0, 0.0)
+                elif method == "tiled":
+                    return _C.matmul_tiled(a_c_tensor, b_c_tensor)
+                else:
+                    raise ValueError(f"Unknown matmul method: {method}")
+        raise RuntimeError("C++ extension not built. Matrix multiplication not available.")
+    
+    def __matmul__(self, other: 'Tensor') -> 'Tensor':
+        """Matrix multiplication."""
+        if self.device != other.device:
+            raise RuntimeError(f"Tensors on different devices: {self.device} vs {other.device}")
+        
+        if len(self._shape) < 2 or len(other._shape) < 2:
+            raise RuntimeError(f"Matrix multiplication requires 2D+ tensors, got {self._shape} and {other._shape}")
+        
+        if self._shape[-1] != other._shape[-2]:
+            raise RuntimeError(f"Incompatible shapes for matmul: {self._shape} and {other._shape}. {self._shape[-1]} != {other._shape[-2]}")
+
+        result_shape = self._shape[:-1] + (other._shape[-1],)
+        
+        result = Tensor.__new__(Tensor)
+        result._shape = result_shape
+        result._size = self._compute_size(result_shape)
+        result.dtype = self.dtype
+        result.device = self.device
+        result.grad = None
+        
+        if _C:
+            result._c_tensor = self._matmul(self._c_tensor, other._c_tensor)
         
         if self.requires_grad or other.requires_grad:
             result.requires_grad = True

@@ -102,8 +102,7 @@ namespace tensora
     void sub_cuda(const float *a, const float *b, float *out, int64_t size);
     void mul_cuda(const float *a, const float *b, float *out, int64_t size);
     void div_cuda(const float *a, const float *b, float *out, int64_t size);
-    void matmul_cuda(const float *a, const float *b, float *out,
-                     int64_t batch_size, int64_t m, int64_t n, int64_t k);
+
     void relu_cuda(const float *in, float *out, int64_t size);
     void sigmoid_cuda(const float *in, float *out, int64_t size);
     void tanh_cuda(const float *in, float *out, int64_t size);
@@ -113,6 +112,10 @@ namespace tensora
     void mean_cuda(const float *in, float *out, const std::vector<int64_t> &shape, int64_t dim);
     void log_cuda(const float *in, float *out, int64_t size);
     void exp_cuda(const float *in, float *out, int64_t size);
+
+    void matmul_cuda(const float *a, const float *b, float *out, int64_t batch_size, int64_t m, int64_t n, int64_t k);
+    void matmul_tiled_cuda(const float *a, const float *b, float *out, int64_t batch_size, int64_t m, int64_t n, int64_t k);
+    void matmul_cuda_shared_memory_coalesced_cuda(const float *a, const float *b, float *c, int64_t batch_size, int64_t m, int64_t n, int64_t k, float alpha, float beta);
 
     void *cuda_malloc(size_t size);
     void cuda_free(void *ptr);

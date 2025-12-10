@@ -259,6 +259,71 @@ namespace tensora
         return result;
     }
 
+    TensorHandle matmul_tiled(const TensorHandle &a, const TensorHandle &b)
+    {
+        // Handle nD matrices: A: (..., m, k), B: (..., k, n) -> C: (..., m, n)
+        int64_t m = a->shape[a->shape.size() - 2];
+        int64_t k = a->shape[a->shape.size() - 1];
+        int64_t n = b->shape[b->shape.size() - 1];
+
+        // Calculate batch size (product of all dimensions except last two)
+        int64_t batch_size = 1;
+        for (size_t i = 0; i < a->shape.size() - 2; ++i)
+        {
+            batch_size *= a->shape[i];
+        }
+
+        // Result shape: same as a's shape but with last dimension replaced by n
+        std::vector<int64_t> result_shape = a->shape;
+        result_shape[result_shape.size() - 1] = n;
+
+        // Calculate total result size
+        int64_t result_size = batch_size * m * n;
+
+        auto result = std::make_shared<TensorImpl>(std::vector<float>(result_size),
+                                                   result_shape, a->dtype, a->device);
+        if (a->device == "cpu")
+        {
+            matmul_cpu(a->data, b->data, result->data, batch_size, m, n, k);
+        }
+        else
+        {
+#ifdef WITH_CUDA
+            matmul_tiled_cuda(a->data, b->data, result->data, batch_size, m, n, k);
+#endif
+        }
+        return result;
+    }
+
+    TensorHandle matmul_with_shared_memory_coalescing(const TensorHandle &a, const TensorHandle &b, float alpha, float beta)
+    {
+        // a: (m, k), b: (k, n)
+        int64_t m = a->shape[0];
+        int64_t k = a->shape[1];
+        int64_t n = b->shape[1];
+
+        int64_t batch_size = 1;
+        for (size_t i = 0; i < a->shape.size() - 2; ++i)
+        {
+            batch_size *= a->shape[i];
+        }
+
+        auto result = std::make_shared<TensorImpl>(std::vector<float>(m * n), std::vector<int64_t>{m, n}, a->dtype, a->device);
+        if (a->device == "cuda")
+        {
+#ifdef WITH_CUDA
+            matmul_cuda_shared_memory_coalesced_cuda(a->data, b->data, result->data, batch_size, m, n, k, alpha, beta);
+#else
+            throw std::runtime_error("CUDA support not compiled");
+#endif
+        }
+        else
+        {
+            throw std::runtime_error("matmul_with_shared_memory_coalescing is only implemented for CUDA tensors");
+        }
+        return result;
+    }
+
     TensorHandle transpose(const TensorHandle &a)
     {
         // Transpose last two dimensions for n-dimensional tensors
@@ -700,7 +765,6 @@ PYBIND11_MODULE(_C, m)
     m.def("subtract", &tensora::subtract);
     m.def("multiply", &tensora::multiply);
     m.def("divide", &tensora::divide);
-    m.def("matmul", &tensora::matmul);
     m.def("transpose", &tensora::transpose);
     m.def("sqrt", &tensora::sqrt_op);
     m.def("pow", &tensora::pow_op);
@@ -720,6 +784,12 @@ PYBIND11_MODULE(_C, m)
     m.def("cross_entropy_loss", &tensora::cross_entropy_loss);
     m.def("cross_entropy_from_logits", &tensora::cross_entropy_from_logits,
           py::arg("logits"), py::arg("targets"), py::arg("reduce_mean") = true);
+
+    // Matmuls
+    m.def("matmul", &tensora::matmul);
+    m.def("matmul_tiled", &tensora::matmul_tiled);
+    m.def("matmul_with_shared_memory_coalescing", &tensora::matmul_with_shared_memory_coalescing,
+          py::arg("a"), py::arg("b"), py::arg("alpha") = 1.0f, py::arg("beta") = 0.0f);
 
     // Utility
     m.def("randn", &tensora::randn);
