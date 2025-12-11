@@ -297,18 +297,30 @@ namespace tensora
 
     TensorHandle matmul_with_shared_memory_coalescing(const TensorHandle &a, const TensorHandle &b, float alpha, float beta)
     {
-        // a: (m, k), b: (k, n)
-        int64_t m = a->shape[0];
-        int64_t k = a->shape[1];
-        int64_t n = b->shape[1];
+        size_t a_dims = a->shape.size();
+        size_t b_dims = b->shape.size();
+
+        int64_t m = a->shape[a_dims - 2];
+        int64_t k = a->shape[a_dims - 1];
+        int64_t n = b->shape[b_dims - 1];
 
         int64_t batch_size = 1;
-        for (size_t i = 0; i < a->shape.size() - 2; ++i)
+        for (size_t i = 0; i < a_dims - 2; ++i)
         {
             batch_size *= a->shape[i];
         }
 
-        auto result = std::make_shared<TensorImpl>(std::vector<float>(m * n), std::vector<int64_t>{m, n}, a->dtype, a->device);
+        std::vector<int64_t> result_shape;
+        for (size_t i = 0; i < a_dims - 2; ++i)
+        {
+            result_shape.push_back(a->shape[i]);
+        }
+        result_shape.push_back(m);
+        result_shape.push_back(n);
+
+        int64_t result_size = batch_size * m * n;
+        auto result = std::make_shared<TensorImpl>(std::vector<float>(result_size), result_shape, a->dtype, a->device);
+
         if (a->device == "cuda")
         {
 #ifdef WITH_CUDA

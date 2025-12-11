@@ -19,10 +19,7 @@ Built from scratch for deep learning and numerical computing with blazing-fast G
 - ⚡ **Extreme Performance**: Up to 448x speedup on GPU operations (1024×1024 matmul)
 - 🔄 **Complete Autograd**: Full automatic differentiation with computational graph
 - 🧠 **PyTorch-like API**: Familiar interface for easy adoption
-- 🎯 **Production Ready**: 229/234 tests passing (98.9% success rate)
-- ✅ **Fully Tested**: 87% code coverage with comprehensive test suite
 - 🔧 **Flexible Deployment**: Works with or without CUDA - automatic fallback to CPU
-- 📦 **Complete Training Pipeline**: SGD and Adam optimizers with verified convergence
 
 ## 🎯 Why Tensora?
 
@@ -71,6 +68,10 @@ python setup.py build_ext --inplace
 # With CUDA
 CUDA_HOME=/usr/local/cuda python setup.py build_ext --inplace
 ```
+
+### PyPI / Astral UV
+
+Coming Soon! (Contributions are welcome!)
 
 ## 🚀 Quick Start
 

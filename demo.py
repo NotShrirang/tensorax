@@ -6,6 +6,7 @@ Demonstrates all core functionalities of the Tensora tensor library.
 """
 
 import time
+import timeit
 from tensora import Tensor
 import tensora.functional as F
 from tensora.nn import Linear, ReLU, Sequential, Sigmoid, Tanh
@@ -280,7 +281,7 @@ def demo_performance_comparison():
         
         # Warm-up
         _ = t1_cuda @ t2_cuda
-        
+
         start = time.time()
         result_cuda = t1_cuda @ t2_cuda
         cuda_time = time.time() - start
@@ -336,6 +337,47 @@ def demo_performance_comparison():
         print(f"  Speedup: {cpu_time/cuda_time:.2f}x")
     except RuntimeError:
         print("  CUDA not available for comparison")
+
+    # Using Timit for benchmarking
+    # Using different methods for matmul
+    # 1. Default
+    # 2. Shared Memory Coalesced
+    # 3. Tiled
+
+    print("\n→ Benchmarking different matmul methods on CUDA:")
+    print("  Methods: default, shared_memory_coalesced, tiled")
+    try:
+        size = 1024
+        batch = 3
+        a = Tensor.randn((batch, size, size), dtype='float32', device='cuda')
+        b = Tensor.randn((batch, size, size), dtype='float32', device='cuda')
+        print(f"\n  Benchmarking different matmul methods with {size}x{size} matrices on CUDA:")
+
+        def matmul_func(method: str):
+            c = a.matmul(b, method=method)
+            return c
+
+        print("\n  Running benchmarks...")
+
+        print("   Method: default")
+        time_default = timeit.timeit(lambda: matmul_func("default"), number=1000)
+        print(f"      Default matmul time over 1000 runs: {time_default:.4f} seconds")
+
+        print("   Method: shared_memory_coalesced")
+        time_shared_memory_coalesced = timeit.timeit(lambda: matmul_func("shared_memory_coalesced"), number=1000)
+        print(f"      Matmul with shared memory coalescing time over 1000 runs: {time_shared_memory_coalesced:.4f} seconds")
+
+        print("   Method: tiled")
+        time_tiled = timeit.timeit(lambda: matmul_func("tiled"), number=1000)
+        print(f"      Tiled matmul time over 1000 runs: {time_tiled:.4f} seconds")
+        print("\n✓ Benchmarking complete.")
+
+        print("\n→ Performance Comparison:")
+        print(f"  SM Coalesced vs Default Speedup: {time_default/time_shared_memory_coalesced:.2f}x")
+        print(f"  Tiled vs Default Speedup: {time_default/time_tiled:.2f}x")
+
+    except RuntimeError:
+        print("  CUDA not available for matmul benchmarking")
 
 
 def demo_simple_training():
@@ -412,7 +454,7 @@ def main():
         
         print("\n" + "█"*70)
         print("█" + " "*68 + "█")
-        print("█" + " "*24 + "Demo Complete!" + " "*29 + "█")
+        print("█" + " "*24 + "Demo Complete!" + " "*30 + "█")
         print("█" + " "*68 + "█")
         print("█"*70 + "\n")
         

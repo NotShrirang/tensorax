@@ -65,8 +65,8 @@ namespace tensora {
 
 
     __global__ void matmul_kernel_shared_memory_coalesced(const float* a, const float* b, float* c, int64_t m, int64_t n, int64_t k, float alpha, float beta) {
-        const int x = blockIdx.x * cuda::WARP_SIZE + (threadIdx.x / cuda::WARP_SIZE);
-        const int y = blockIdx.y * cuda::WARP_SIZE + (threadIdx.x % cuda::WARP_SIZE);
+        const int x = blockIdx.y * cuda::WARP_SIZE + (threadIdx.x / cuda::WARP_SIZE);
+        const int y = blockIdx.x * cuda::WARP_SIZE + (threadIdx.x % cuda::WARP_SIZE);
 
         if (x < m && y < n) {
             float sum = 0.0f;
@@ -77,8 +77,7 @@ namespace tensora {
         }
     }
 
-    void matmul_cuda(const float* a, const float* b, float* c,
-                    int64_t batch_size, int64_t m, int64_t n, int64_t k) {
+    void matmul_cuda(const float* a, const float* b, float* c, int64_t batch_size, int64_t m, int64_t n, int64_t k) {
         // Use naive kernel for simplicity
         dim3 block(cuda::WARP_SIZE, cuda::WARP_SIZE);
         dim3 grid(CEIL_DIV(n, cuda::WARP_SIZE), CEIL_DIV(m, cuda::WARP_SIZE));
@@ -125,7 +124,7 @@ namespace tensora {
 
     void matmul_cuda_shared_memory_coalesced_cuda(const float* a, const float* b, float* c, int64_t batch_size, int64_t m, int64_t n, int64_t k, float alpha, float beta) {
         dim3 block(cuda::WARP_SIZE * cuda::WARP_SIZE);
-        dim3 grid(CEIL_DIV(m, cuda::WARP_SIZE), CEIL_DIV(n, cuda::WARP_SIZE));
+        dim3 grid(CEIL_DIV(n, cuda::WARP_SIZE), CEIL_DIV(m, cuda::WARP_SIZE));
         
         int64_t matrix_size_a = m * k;
         int64_t matrix_size_b = k * n;
