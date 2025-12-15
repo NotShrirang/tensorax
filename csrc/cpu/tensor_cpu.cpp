@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <stdexcept>
 
-namespace tensora
+namespace tensorax
 {
 
     void add_cpu(const float *a, const float *b, float *out, int64_t size)
@@ -460,4 +460,4 @@ namespace tensora
             out[i] = std::exp(in[i]);
         }
     }
-} // namespace tensora
+} // namespace tensoraxx

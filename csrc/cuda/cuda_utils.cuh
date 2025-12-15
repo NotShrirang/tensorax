@@ -13,7 +13,7 @@
         }                                                                   \
     } while (0)
 
-namespace tensora {
+namespace tensorax {
     namespace cuda {
         // Common CUDA configurations
         constexpr int BLOCK_SIZE = 256;
@@ -25,4 +25,4 @@ namespace tensora {
             return dim3((n + block_size - 1) / block_size);
         }
     } // namespace cuda
-} // namespace tensora
+} // namespace tensoraxx

@@ -7,7 +7,7 @@ such as whether an object is a Tensor, a NumPy array, or other types.
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from tensora.tensor import Tensor
+    from tensorax.tensor import Tensor
 
 def is_tensor(x):
     return isinstance(x, Tensor)

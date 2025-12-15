@@ -1,14 +1,14 @@
-# Tensora Architecture
+# Tensorax Architecture
 
 **Status:** Production Ready (December 9, 2025)  
 **Version:** 0.1.0  
 **Test Coverage:** 87% (229/234 tests passing)
 
-This document provides a comprehensive overview of Tensora's architecture and design decisions.
+This document provides a comprehensive overview of Tensorax's architecture and design decisions.
 
 ## Design Philosophy
 
-Tensora is designed with the following principles:
+Tensorax is designed with the following principles:
 
 1. **Performance**: Leverage CUDA for GPU acceleration while maintaining efficient CPU fallbacks
 2. **Simplicity**: Clean, intuitive API similar to PyTorch
@@ -67,7 +67,7 @@ class Tensor:
 High-level API for building neural networks:
 
 ```
-tensora/
+tensorax/
 ├── nn/
 │   ├── module.py        # Base Module class
 │   └── layers.py        # Pre-built layers
@@ -103,7 +103,7 @@ tensora/
 
 ## Automatic Differentiation
 
-Tensora implements reverse-mode automatic differentiation:
+Tensorax implements reverse-mode automatic differentiation:
 
 1. **Forward Pass**: Build computation graph
 
@@ -195,14 +195,14 @@ __global__ void reduce_sum_kernel(...) {
 2. **Add CPU fallback** (`csrc/cpu/`)
 3. **Declare in header** (`csrc/tensor_ops.h`)
 4. **Create Python binding** (`csrc/tensor_ops.cpp`)
-5. **Expose in Tensor API** (`tensora/tensor.py`)
+5. **Expose in Tensor API** (`tensorax/tensor.py`)
 
 ### Adding New Layers
 
-1. **Subclass Module** (`tensora/nn/layers.py`)
+1. **Subclass Module** (`tensorax/nn/layers.py`)
 2. **Implement forward method**
 3. **Register parameters**
-4. **Add to exports** (`tensora/nn/__init__.py`)
+4. **Add to exports** (`tensorax/nn/__init__.py`)
 
 ## Performance Considerations
 

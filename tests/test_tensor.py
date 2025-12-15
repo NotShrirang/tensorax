@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
-from tensora import Tensor, cuda_is_available
-from tensora.utils.shape_utils import _compute_size, _has_valid_shape, _infer_shape
+from tensorax import Tensor, cuda_is_available
+from tensorax.utils.shape_utils import _compute_size, _has_valid_shape, _infer_shape
 
 
 class TestShapeUtils:

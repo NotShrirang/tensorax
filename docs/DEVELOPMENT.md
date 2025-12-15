@@ -4,15 +4,15 @@
 **Test Status:** 229/234 tests passing (98.9%)  
 **Coverage:** 87%
 
-This guide covers the development workflow for Tensora.
+This guide covers the development workflow for Tensorax.
 
 ## Setting Up Development Environment
 
 1. **Clone the repository:**
 
 ```bash
-git clone https://github.com/NotShrirang/tensora.git
-cd tensora
+git clone https://github.com/NotShrirang/tensorax.git
+cd tensorax
 ```
 
 2. **Create a virtual environment:**
@@ -31,7 +31,7 @@ pip install -e ".[dev]"
 ## Project Structure
 
 ```
-tensora/
+tensorax/
 ├── csrc/                  # C++ and CUDA source code
 │   ├── cuda/             # CUDA-specific code
 │   │   ├── kernels/     # CUDA kernel implementations
@@ -44,7 +44,7 @@ tensora/
 │   │   └── tensor_cpu.cpp
 │   ├── tensor_ops.h     # Header with declarations
 │   └── tensor_ops.cpp   # Main C++ entry point with Python bindings
-├── tensora/             # Python package
+├── tensorax/             # Python package
 │   ├── __init__.py
 │   ├── tensor.py        # Core Tensor class
 │   ├── functional.py    # Functional API
@@ -94,7 +94,7 @@ pytest tests/
 pytest tests/ -v
 
 # Run with coverage report
-pytest tests/ --cov=tensora --cov-report=html --cov-report=term
+pytest tests/ --cov=tensorax --cov-report=html --cov-report=term
 ```
 
 ### Run Specific Test Categories
@@ -123,7 +123,7 @@ pytest tests/test_integration.py -v
 
 ```bash
 # Generate HTML coverage report
-pytest tests/ --cov=tensora --cov-report=html
+pytest tests/ --cov=tensorax --cov-report=html
 
 # View coverage report
 open htmlcov/index.html  # macOS
@@ -151,19 +151,19 @@ start htmlcov/index.html  # Windows
 Format code with Black:
 
 ```bash
-black tensora/ tests/
+black tensorax/ tests/
 ```
 
 Check with flake8:
 
 ```bash
-flake8 tensora/ tests/
+flake8 tensorax/ tests/
 ```
 
 Type checking with mypy:
 
 ```bash
-mypy tensora/
+mypy tensorax/
 ```
 
 ## Adding New Features
@@ -173,19 +173,19 @@ mypy tensora/
 1. Create kernel in `csrc/cuda/kernels/your_kernel.cu`
 2. Declare function in `csrc/tensor_ops.h`
 3. Add Python binding in `csrc/tensor_ops.cpp`
-4. Expose in Python API in `tensora/tensor.py` or `tensora/functional.py`
+4. Expose in Python API in `tensorax/tensor.py` or `tensorax/functional.py`
 5. Add tests in `tests/`
 
 ### 2. Adding a new layer
 
-1. Create layer class in `tensora/nn/layers.py`
-2. Export in `tensora/nn/__init__.py`
+1. Create layer class in `tensorax/nn/layers.py`
+2. Export in `tensorax/nn/__init__.py`
 3. Add tests in `tests/test_nn.py`
 4. Add example in `examples/`
 
 ### 3. Adding a new optimizer
 
-1. Create optimizer in `tensora/optim.py`
+1. Create optimizer in `tensorax/optim.py`
 2. Add tests in `tests/test_optim.py`
 
 ## Performance Optimization Tips

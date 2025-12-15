@@ -1,6 +1,6 @@
 import pytest
 import numpy as np
-from tensora import nn, Tensor, cuda_is_available
+from tensorax import nn, Tensor, cuda_is_available
 
 
 class TestLinearLayer:

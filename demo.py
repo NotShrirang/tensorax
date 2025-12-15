@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Tensora Library Demo
+Tensorax Library Demo
 ====================
-Demonstrates all core functionalities of the Tensora tensor library.
+Demonstrates all core functionalities of the Tensorax tensor library.
 """
 
 import time
 import timeit
-from tensora import Tensor
-import tensora.functional as F
-from tensora.nn import Linear, ReLU, Sequential, Sigmoid, Tanh
-from tensora.optim import SGD, Adam
+from tensoraxx import Tensor
+import tensoraxx.functional as F
+from tensoraxx.nn import Linear, ReLU, Sequential, Sigmoid, Tanh
+from tensoraxx.optim import SGD, Adam
 
 
 def print_section(title):

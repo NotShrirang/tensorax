@@ -2,7 +2,7 @@
 #include "../tensor_ops.h"
 #include <cuda_runtime.h>
 
-namespace tensora {
+namespace tensorax {
 
 bool cuda_is_available() {
     int device_count = 0;
@@ -28,4 +28,4 @@ void cuda_memcpy_d2h(void* dst, const void* src, size_t size) {
     CUDA_CHECK(cudaMemcpy(dst, src, size, cudaMemcpyDeviceToHost));
 }
 
-} // namespace tensora
+} // namespace tensoraxx

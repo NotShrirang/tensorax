@@ -3,7 +3,7 @@ Example demonstrating CUDA acceleration (requires GPU).
 """
 
 import numpy as np
-from tensora import Tensor, cuda_is_available
+from tensorax import Tensor, cuda_is_available
 
 def main():
     print("=== CUDA Operations Example ===\n")

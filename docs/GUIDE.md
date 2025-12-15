@@ -1,4 +1,4 @@
-# Tensora User & Developer Guide
+# Tensorax User & Developer Guide
 
 **Status:** Production Ready (December 9, 2025)
 **Test Coverage:** 229/234 tests passing (98.9%), 87% code coverage
@@ -7,7 +7,7 @@ This comprehensive guide covers everything from basic usage to advanced developm
 
 ## Project Status: Production Ready ✅
 
-Tensora has achieved production-ready status with:
+Tensorax has achieved production-ready status with:
 
 - ✅ Complete tensor operations (element-wise, reduction, mathematical)
 - ✅ Full autograd system with gradient tracking
@@ -24,8 +24,8 @@ Tensora has achieved production-ready status with:
 
 ```bash
 # Clone the repository
-git clone https://github.com/NotShrirang/tensora.git
-cd tensora
+git clone https://github.com/NotShrirang/tensorax.git
+cd tensorax
 
 # Create and activate virtual environment
 python -m venv .venv
@@ -42,14 +42,14 @@ bash build.sh
 pip install -e .
 
 # Verify installation
-python -c "import tensora; print(f'Tensora version: {tensora.__version__}')"
+python -c "import tensorax; print(f'Tensorax version: {tensorax.__version__}')"
 ```
 
 ### Running Tests
 
 ```bash
 # Run all tests with coverage
-pytest tests/ --cov=tensora --cov-report=html --cov-report=term
+pytest tests/ --cov=tensorax --cov-report=html --cov-report=term
 
 # Run specific test categories
 pytest tests/test_tensor.py -v          # Core tensor tests
@@ -71,7 +71,7 @@ nvidia-smi
 CUDA_HOME=/usr/local/cuda python setup.py build_ext --inplace
 
 # Test CUDA functionality
-python -c "from tensora import Tensor; print(f'CUDA available: {Tensor.cuda_is_available()}')"
+python -c "from tensorax import Tensor; print(f'CUDA available: {Tensor.cuda_is_available()}')"
 ```
 
 ## Phase 2: Core Operations (Weeks 3-4)
@@ -89,7 +89,7 @@ python -c "from tensora import Tensor; print(f'CUDA available: {Tensor.cuda_is_a
    - `csrc/cuda/kernels/elementwise.cu` - Add CUDA kernels
    - `csrc/tensor_ops.h` - Declare functions
    - `csrc/tensor_ops.cpp` - Add Python bindings
-   - `tensora/tensor.py` - Implement operators
+   - `tensorax/tensor.py` - Implement operators
 
 2. **Reshape and View Operations**
 
@@ -125,7 +125,7 @@ python -c "from tensora import Tensor; print(f'CUDA available: {Tensor.cuda_is_a
 1. **Computation Graph**
 
    ```python
-   # In tensora/autograd.py (create this file)
+   # In tensorax/autograd.py (create this file)
    class Function:
        @staticmethod
        def forward(ctx, *args):
@@ -137,7 +137,7 @@ python -c "from tensora import Tensor; print(f'CUDA available: {Tensor.cuda_is_a
    ```
 
 2. **Operation Functions**
-   Create `tensora/autograd/functions.py`:
+   Create `tensorax/autograd/functions.py`:
 
    - AddBackward
    - MulBackward
@@ -289,7 +289,7 @@ python -c "from tensora import Tensor; print(f'CUDA available: {Tensor.cuda_is_a
 ### 1. Mixed Precision Training
 
 ```python
-# tensora/amp.py
+# tensorax/amp.py
 class GradScaler:
     def scale(self, loss):
         return loss * self.scale_factor
@@ -301,7 +301,7 @@ class GradScaler:
 ### 2. Multi-GPU Support
 
 ```python
-# tensora/nn/parallel.py
+# tensorax/nn/parallel.py
 class DataParallel(Module):
     def __init__(self, module, device_ids):
         self.module = module
@@ -325,7 +325,7 @@ def load(model, path):
 ### 4. JIT Compilation
 
 ```python
-# tensora/jit.py
+# tensorax/jit.py
 @jit
 def custom_operation(x, y):
     return x * y + x
@@ -371,7 +371,7 @@ def custom_operation(x, y):
        import torch
        x_np = np.random.randn(100, 100)
 
-       # Tensora
+       # Tensorax
        x_tr = Tensor(x_np)
        y_tr = F.relu(x_tr)
 

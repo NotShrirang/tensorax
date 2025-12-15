@@ -44,7 +44,7 @@ jobs:
         python -c "
 import time
 import numpy as np
-from tensora import Tensor
+from tensorax import Tensor
 
 print('=' * 60)
 print('TENSORA PERFORMANCE BENCHMARKS')

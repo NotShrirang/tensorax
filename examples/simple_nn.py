@@ -3,7 +3,7 @@ Example of building a simple neural network with Tensora.
 """
 
 import numpy as np
-from tensora import Tensor, nn, optim, functional as F
+from tensorax import Tensor, nn, optim, functional as F
 
 class SimpleNet(nn.Module):
     """Simple feedforward neural network."""

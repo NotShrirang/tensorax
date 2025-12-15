@@ -1,6 +1,6 @@
 import pytest
 import numpy as np
-from tensora import functional as F, Tensor
+from tensorax import functional as F, Tensor
 
 
 class TestActivationFunctions:

@@ -2,7 +2,7 @@
 #include "../tensor_ops.h"
 #include "reduction.cuh"
 
-namespace tensora {
+namespace tensorax {
 
 __global__ void reduce_sum_kernel(const float* input, float* output, int64_t output_size, int64_t reduce_size, 
                                   int64_t inner_size, int64_t stride) {
@@ -82,4 +82,4 @@ void reduce_max_cuda(const float* input, float* output, int64_t output_size, int
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
-} // namespace tensora
+} // namespace tensoraxx

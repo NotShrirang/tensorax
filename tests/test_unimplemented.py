@@ -1,6 +1,6 @@
 import pytest
 import numpy as np
-from tensora import nn, Tensor
+from tensorax import nn, Tensor
 
 
 class TestUnimplementedLayers:

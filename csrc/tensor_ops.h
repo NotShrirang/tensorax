@@ -5,7 +5,7 @@
 #include <memory>
 #include <string>
 
-namespace tensora
+namespace tensorax
 {
     class TensorImpl;
 

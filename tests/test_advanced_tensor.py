@@ -1,6 +1,6 @@
 import pytest
 import numpy as np
-from tensora import Tensor
+from tensorax import Tensor
 
 
 class TestAdvancedTensorOps:

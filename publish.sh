@@ -1,5 +1,5 @@
 #!/bin/bash
-# Publish Tensora to PyPI
+# Publish Tensorax to PyPI
 # Usage: ./publish.sh [test|prod]
 
 set -e
@@ -7,7 +7,7 @@ set -e
 TARGET=${1:-test}
 
 echo "=================================================="
-echo "  Tensora PyPI Publishing Script"
+echo "  Tensorax PyPI Publishing Script"
 echo "=================================================="
 echo ""
 
@@ -25,7 +25,7 @@ if ! command -v twine &> /dev/null; then
 fi
 
 # Get version
-VERSION=$(grep -oP "__version__ = ['\"]([^'\"]+)" tensora/__init__.py | grep -oP "[0-9.]+")
+VERSION=$(grep -oP "__version__ = ['\"]([^'\"]+)" tensorax/__init__.py | grep -oP "[0-9.]+")
 echo -e "${GREEN}Building version: $VERSION${NC}"
 echo ""
 
@@ -52,7 +52,7 @@ echo ""
 if [ "$TARGET" == "test" ]; then
     echo -e "${YELLOW}📤 Uploading to TestPyPI...${NC}"
     echo "You can test install with:"
-    echo "  pip install --index-url https://test.pypi.org/simple/ tensora"
+    echo "  pip install --index-url https://test.pypi.org/simple/ tensorax"
     echo ""
     twine upload --repository testpypi dist/*
 elif [ "$TARGET" == "prod" ]; then
@@ -75,7 +75,7 @@ echo ""
 
 if [ "$TARGET" == "prod" ]; then
     echo "Users can now install with:"
-    echo "  pip install tensora"
+    echo "  pip install tensorax"
     echo ""
     echo "Don't forget to:"
     echo "  1. Create a git tag: git tag v$VERSION && git push --tags"

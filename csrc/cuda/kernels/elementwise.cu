@@ -3,7 +3,7 @@
 #include "reduction.cuh"
 #include <vector>
 
-namespace tensora {
+namespace tensorax {
     __global__ void add_kernel(const float* a, const float* b, float* out, int64_t size) {
         int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
         if (idx < size) {
@@ -350,4 +350,4 @@ namespace tensora {
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaDeviceSynchronize());
     }
-}// namespace tensora
+}// namespace tensorax

@@ -41,7 +41,7 @@ jobs:
       - name: Run tests with coverage
         run: |
           pytest tests/ -v \
-            --cov=tensora \
+            --cov=tensorax \
             --cov-report=xml \
             --cov-report=html \
             --cov-report=term-missing

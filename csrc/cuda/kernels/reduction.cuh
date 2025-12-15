@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace tensora {
+namespace tensorax {
 
 // Kernel declarations
 __global__ void reduce_sum_kernel(const float* input, float* output, int64_t output_size, int64_t reduce_size,
@@ -19,4 +19,4 @@ void reduce_mean_cuda(const float* input, float* output, int64_t output_size, in
 void reduce_max_cuda(const float* input, float* output, int64_t output_size, int64_t reduce_size,
                      int64_t inner_size, int64_t stride);
 
-} // namespace tensora
+} // namespace tensoraxx

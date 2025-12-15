@@ -3,7 +3,7 @@
 
 set -e
 
-echo "Building Tensora..."
+echo "Building Tensorax..."
 
 # Check if CUDA is available
 if [ -d "/usr/local/cuda" ]; then

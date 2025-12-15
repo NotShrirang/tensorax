@@ -2,7 +2,7 @@ include README.md
 include LICENSE
 include pyproject.toml
 recursive-include csrc *.cpp *.cu *.h *.cuh
-recursive-include tensora *.py
+recursive-include tensorax *.py
 recursive-exclude tests *
 recursive-exclude examples *
 recursive-exclude docs *

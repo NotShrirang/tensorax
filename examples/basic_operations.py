@@ -3,7 +3,7 @@ Simple example demonstrating basic tensor operations.
 """
 
 import numpy as np
-from tensora import Tensor
+from tensorax import Tensor
 
 def main():
     print("=== Basic Tensor Operations ===\n")

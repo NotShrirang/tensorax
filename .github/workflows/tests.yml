@@ -54,7 +54,7 @@ jobs:
 
       - name: Run tests
         run: |
-          pytest tests/ -v --cov=tensora --cov-report=xml --cov-report=term
+          pytest tests/ -v --cov=tensorax --cov-report=xml --cov-report=term
 
   test-cuda:
     name: Test with CUDA
@@ -88,7 +88,7 @@ jobs:
 
       - name: Check CUDA availability
         run: |
-          python3 -c "from tensora import Tensor; print(f'CUDA available: {Tensor.cuda_is_available()}')"
+          python3 -c "from tensorax import Tensor; print(f'CUDA available: {Tensor.cuda_is_available()}')"
 
       - name: Run tests (CPU only in CI)
         run: |

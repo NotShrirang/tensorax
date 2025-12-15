@@ -1,5 +1,5 @@
 """
-Core Tensor class for Tensora library.
+Core Tensor class for Tensorax library.
 Pure C++/CUDA backend - no NumPy dependency.
 """
 
@@ -12,9 +12,9 @@ except ImportError as e:
     warnings.warn(f"Failed to import _C module: {e}. Tensor operations will not work until the package is built.")
     _C = None  # Will be available after building
 
-import tensora as ts
-from tensora.utils.type_checks import is_numpy_array
-from tensora.utils.shape_utils import _compute_size, _has_valid_shape
+import tensorax as ts
+from tensorax.utils.type_checks import is_numpy_array
+from tensorax.utils.shape_utils import _compute_size, _has_valid_shape
 
 class Tensor:
     """

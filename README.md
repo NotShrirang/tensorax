@@ -1,4 +1,4 @@
-# Tensora
+# Tensorax
 
 **A high-performance tensor computation library with CUDA acceleration, designed for deep learning and numerical computing.**
 
@@ -7,8 +7,8 @@ Built from scratch for deep learning and numerical computing with blazing-fast G
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CUDA](https://img.shields.io/badge/CUDA-11.0+-green.svg)](https://developer.nvidia.com/cuda-toolkit)
-[![CI](https://github.com/NotShrirang/tensora/workflows/Tests/badge.svg)](https://github.com/NotShrirang/tensora/actions/workflows/tests.yml)
-[![Code Coverage](https://github.com/NotShrirang/tensora/workflows/Code%20Coverage/badge.svg)](https://github.com/NotShrirang/tensora/actions/workflows/coverage.yml)
+[![CI](https://github.com/NotShrirang/tensorax/workflows/Tests/badge.svg)](https://github.com/NotShrirang/tensorax/actions/workflows/tests.yml)
+[![Code Coverage](https://github.com/NotShrirang/tensorax/workflows/Code%20Coverage/badge.svg)](https://github.com/NotShrirang/tensorax/actions/workflows/coverage.yml)
 
 <!-- [![Tests](https://img.shields.io/badge/tests-229%20passed-brightgreen.svg)](tests/)
 [![Coverage](https://img.shields.io/badge/coverage-87%25-green.svg)](htmlcov/) -->
@@ -21,9 +21,9 @@ Built from scratch for deep learning and numerical computing with blazing-fast G
 - 🧠 **PyTorch-like API**: Familiar interface for easy adoption
 - 🔧 **Flexible Deployment**: Works with or without CUDA - automatic fallback to CPU
 
-## 🎯 Why Tensora?
+## 🎯 Why Tensorax?
 
-Unlike other libraries that wrap PyTorch or depend on NumPy, Tensora is built **completely from scratch**:
+Unlike other libraries that wrap PyTorch or depend on NumPy, Tensorax is built **completely from scratch**:
 
 - ✅ **Zero heavy dependencies** - Only requires `pybind11` for Python bindings
 - ✅ **Production ready** - Complete training pipeline with optimizers and backprop
@@ -53,8 +53,8 @@ Unlike other libraries that wrap PyTorch or depend on NumPy, Tensora is built **
 ### Quick Install
 
 ```bash
-git clone https://github.com/NotShrirang/tensora.git
-cd tensora
+git clone https://github.com/NotShrirang/tensorax.git
+cd tensorax
 bash build.sh       # Automatically detects CUDA
 pip install -e .
 ```
@@ -84,7 +84,7 @@ python demo.py  # Comprehensive showcase of all features
 ### Basic Tensor Operations
 
 ```python
-from tensora import Tensor
+from tensorax import Tensor
 
 # Create tensors
 a = Tensor([[1.0, 2.0], [3.0, 4.0]])
@@ -118,7 +118,7 @@ if Tensor.cuda_is_available():
 ### Automatic Differentiation
 
 ```python
-from tensora import Tensor
+from tensorax import Tensor
 
 # Create tensors with gradient tracking
 x = Tensor([[2.0]], requires_grad=True)
@@ -140,7 +140,7 @@ print(b.grad)  # dy/db = 1
 ### Neural Networks & Training
 
 ```python
-from tensora import nn, Tensor, optim, functional as F
+from tensorax import nn, Tensor, optim, functional as F
 
 # Define a model
 model = nn.Sequential(
@@ -171,7 +171,7 @@ for epoch in range(100):
 ### Functional API
 
 ```python
-from tensora import functional as F, Tensor
+from tensorax import functional as F, Tensor
 
 x = Tensor([[-2.0, -1.0, 0.0, 1.0, 2.0]])
 
@@ -190,12 +190,12 @@ loss = F.mse_loss(pred, target)  # Mean squared error
 ## Project Structure
 
 ```
-tensora/
+tensorax/
 ├── csrc/              # C++ and CUDA source code
 │   ├── cuda/         # CUDA implementations
 │   ├── cpu/          # CPU implementations
 │   └── tensor_ops.*  # Core operations
-├── tensora/          # Python package
+├── tensorax/          # Python package
 │   ├── tensor.py     # Tensor class
 │   ├── nn/          # Neural network modules
 │   ├── functional.py # Functional API
@@ -207,7 +207,7 @@ tensora/
 
 ## ⚡ Performance
 
-Tensora uses hand-optimized CUDA kernels for maximum performance:
+Tensorax uses hand-optimized CUDA kernels for maximum performance:
 
 | Operation       | Matrix Size | CPU Time   | CUDA Time | Speedup    |
 | --------------- | ----------- | ---------- | --------- | ---------- |
@@ -235,8 +235,8 @@ Tensora uses hand-optimized CUDA kernels for maximum performance:
 
 ```bash
 # Clone repository
-git clone https://github.com/NotShrirang/tensora.git
-cd tensora
+git clone https://github.com/NotShrirang/tensorax.git
+cd tensorax
 
 # Create virtual environment
 python -m venv .venv
@@ -273,7 +273,7 @@ pytest tests/
 pytest tests/ -v
 
 # Run with coverage report
-pytest tests/ --cov=tensora --cov-report=html --cov-report=term
+pytest tests/ --cov=tensorax --cov-report=html --cov-report=term
 
 # Run specific test file
 pytest tests/test_tensor.py -v
@@ -394,7 +394,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🎓 Learning Resource
 
-Tensora is an excellent educational tool for understanding:
+Tensorax is an excellent educational tool for understanding:
 
 - Deep learning internals (how PyTorch/TensorFlow work under the hood)
 - CUDA programming and GPU optimization
@@ -406,26 +406,26 @@ Check out the [examples/](examples/) directory for tutorials!
 
 ## 📄 Citation
 
-If you use Tensora in your research or project, please cite:
+If you use Tensorax in your research or project, please cite:
 
 ```bibtex
-@software{tensora2025,
-  title = {Tensora: Pure C++/CUDA Tensor Library},
+@software{tensorax2025,
+  title = {Tensorax: Pure C++/CUDA Tensor Library},
   author = {NotShrirang},
   year = {2025},
-  url = {https://github.com/NotShrirang/tensora}
+  url = {https://github.com/NotShrirang/tensorax}
 }
 ```
 
 ## 📞 Contact & Support
 
 - **GitHub**: [@NotShrirang](https://github.com/NotShrirang)
-- **Issues**: [Report bugs or request features](https://github.com/NotShrirang/tensora/issues)
-- **Discussions**: [Ask questions](https://github.com/NotShrirang/tensora/discussions)
+- **Issues**: [Report bugs or request features](https://github.com/NotShrirang/tensorax/issues)
+- **Discussions**: [Ask questions](https://github.com/NotShrirang/tensorax/discussions)
 
 ## ⭐ Star History
 
-If you find Tensora useful, please consider giving it a star! ⭐
+If you find Tensorax useful, please consider giving it a star! ⭐
 
 ---
 

@@ -8,7 +8,7 @@
 
 namespace py = pybind11;
 
-namespace tensora
+namespace tensorax
 {
 
     // TensorImpl implementation
@@ -795,70 +795,70 @@ namespace tensora
         return std::make_shared<TensorImpl>(data, shape, dtype, device);
     }
 
-} // namespace tensora
+} // namespace tensoraxx
 
 // Python bindings
 PYBIND11_MODULE(_C, m)
 {
-    m.doc() = "Tensora C++ extension module - Pure implementation without NumPy";
+    m.doc() = "Tensorax C++ extension module - Pure implementation without NumPy";
 
-    py::class_<tensora::TensorImpl, std::shared_ptr<tensora::TensorImpl>>(m, "TensorImpl")
-        .def_readonly("shape", &tensora::TensorImpl::shape)
-        .def_readonly("size", &tensora::TensorImpl::size)
-        .def_readonly("dtype", &tensora::TensorImpl::dtype)
-        .def_readonly("device", &tensora::TensorImpl::device);
+    py::class_<tensorax::TensorImpl, std::shared_ptr<tensorax::TensorImpl>>(m, "TensorImpl")
+        .def_readonly("shape", &tensorax::TensorImpl::shape)
+        .def_readonly("size", &tensorax::TensorImpl::size)
+        .def_readonly("dtype", &tensorax::TensorImpl::dtype)
+        .def_readonly("device", &tensorax::TensorImpl::device);
 
     // Tensor creation
-    m.def("create_tensor_cpu", &tensora::create_tensor_cpu);
-    m.def("create_tensor_cuda", &tensora::create_tensor_cuda);
-    m.def("copy_tensor", &tensora::copy_tensor);
+    m.def("create_tensor_cpu", &tensorax::create_tensor_cpu);
+    m.def("create_tensor_cuda", &tensorax::create_tensor_cuda);
+    m.def("copy_tensor", &tensorax::copy_tensor);
 
     // Device transfer
-    m.def("tensor_cpu_to_cuda", &tensora::tensor_cpu_to_cuda);
-    m.def("tensor_cuda_to_cpu", &tensora::tensor_cuda_to_cpu);
+    m.def("tensor_cpu_to_cuda", &tensorax::tensor_cpu_to_cuda);
+    m.def("tensor_cuda_to_cpu", &tensorax::tensor_cuda_to_cpu);
 
     // Data access
-    m.def("tensor_to_list", &tensora::tensor_to_list);
+    m.def("tensor_to_list", &tensorax::tensor_to_list);
 
     // Operations
-    m.def("add", &tensora::add);
-    m.def("broadcasting_add", &tensora::broadcasting_add);
-    m.def("subtract", &tensora::subtract);
-    m.def("multiply", &tensora::multiply);
-    m.def("divide", &tensora::divide);
-    m.def("transpose", &tensora::transpose);
-    m.def("sqrt", &tensora::sqrt_op);
-    m.def("pow", &tensora::pow_op);
-    m.def("sum", &tensora::sum);
-    m.def("mean", &tensora::mean);
-    m.def("log", &tensora::log);
-    m.def("exp", &tensora::exp);
+    m.def("add", &tensorax::add);
+    m.def("broadcasting_add", &tensorax::broadcasting_add);
+    m.def("subtract", &tensorax::subtract);
+    m.def("multiply", &tensorax::multiply);
+    m.def("divide", &tensorax::divide);
+    m.def("transpose", &tensorax::transpose);
+    m.def("sqrt", &tensorax::sqrt_op);
+    m.def("pow", &tensorax::pow_op);
+    m.def("sum", &tensorax::sum);
+    m.def("mean", &tensorax::mean);
+    m.def("log", &tensorax::log);
+    m.def("exp", &tensorax::exp);
 
     // Activations
-    m.def("relu", &tensora::relu);
-    m.def("sigmoid", &tensora::sigmoid);
-    m.def("tanh", &tensora::tanh_op);
-    m.def("softmax", &tensora::softmax);
+    m.def("relu", &tensorax::relu);
+    m.def("sigmoid", &tensorax::sigmoid);
+    m.def("tanh", &tensorax::tanh_op);
+    m.def("softmax", &tensorax::softmax);
 
     // Losses
-    m.def("mse_loss", &tensora::mse_loss);
-    m.def("cross_entropy_loss", &tensora::cross_entropy_loss);
-    m.def("cross_entropy_from_logits", &tensora::cross_entropy_from_logits,
+    m.def("mse_loss", &tensorax::mse_loss);
+    m.def("cross_entropy_loss", &tensorax::cross_entropy_loss);
+    m.def("cross_entropy_from_logits", &tensorax::cross_entropy_from_logits,
           py::arg("logits"), py::arg("targets"), py::arg("reduce_mean") = true);
 
     // Matmuls
-    m.def("matmul", &tensora::matmul);
-    m.def("matmul_tiled", &tensora::matmul_tiled);
-    m.def("matmul_with_shared_memory_coalescing", &tensora::matmul_with_shared_memory_coalescing,
+    m.def("matmul", &tensorax::matmul);
+    m.def("matmul_tiled", &tensorax::matmul_tiled);
+    m.def("matmul_with_shared_memory_coalescing", &tensorax::matmul_with_shared_memory_coalescing,
           py::arg("a"), py::arg("b"), py::arg("alpha") = 1.0f, py::arg("beta") = 0.0f);
-    m.def("matmul_with_shared_memory_cache_blocking", &tensora::matmul_with_shared_memory_cache_blocking,
+    m.def("matmul_with_shared_memory_cache_blocking", &tensorax::matmul_with_shared_memory_cache_blocking,
           py::arg("a"), py::arg("b"), py::arg("alpha") = 1.0f, py::arg("beta") = 0.0f);
 
     // Utility
-    m.def("randn", &tensora::randn);
+    m.def("randn", &tensorax::randn);
 
 #ifdef WITH_CUDA
-    m.def("cuda_is_available", &tensora::cuda_is_available);
+    m.def("cuda_is_available", &tensorax::cuda_is_available);
 #else
     m.def("cuda_is_available", []()
           { return false; });

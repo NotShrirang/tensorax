@@ -1,6 +1,6 @@
 import pytest
 import numpy as np
-from tensora import Tensor, optim, nn
+from tensorax import Tensor, optim, nn
 
 
 class TestSGDOptimizer:
@@ -269,7 +269,7 @@ class TestTrainingLoops:
             opt.step()
 
     def test_adam_multiple_steps_convergence(self):
-        import tensora.functional as F
+        import tensorax.functional as F
         linear = nn.Linear(2, 1)
         opt = optim.Adam(linear.parameters(), lr=0.1)
         x = Tensor([[1, 2]], dtype='float32')

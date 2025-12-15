@@ -3,7 +3,7 @@ requires = ["setuptools>=45", "wheel", "pybind11>=2.6.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "tensora"
+name = "tensorax"
 dynamic = ["version", "dependencies", "optional-dependencies"]
 description = "A high-performance tensor library with CUDA acceleration"
 readme = "README.md"
@@ -23,10 +23,10 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/NotShrirang/tensora"
-Documentation = "https://tensora.readthedocs.io"
-Repository = "https://github.com/NotShrirang/tensora"
-Issues = "https://github.com/NotShrirang/tensora/issues"
+Homepage = "https://github.com/NotShrirang/tensorax"
+Documentation = "https://tensorax.readthedocs.io"
+Repository = "https://github.com/NotShrirang/tensorax"
+Issues = "https://github.com/NotShrirang/tensorax/issues"
 
 [tool.black]
 line-length = 100
@@ -48,8 +48,8 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
-addopts = "-v --cov=tensora --cov-report=html --cov-report=term"
+addopts = "-v --cov=tensorax --cov-report=html --cov-report=term"
 
 [tool.coverage.run]
-source = ["tensora"]
+source = ["tensorax"]
 omit = ["*/tests/*", "*/examples/*"]

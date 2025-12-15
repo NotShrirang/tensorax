@@ -15,7 +15,7 @@ except ImportError:
 
 # Read version from __init__.py
 def read_version():
-    with open(os.path.join('tensora', '__init__.py'), 'r') as f:
+    with open(os.path.join('tensorax', '__init__.py'), 'r') as f:
         for line in f:
             if line.startswith('__version__'):
                 return line.split('=')[1].strip().strip('"').strip("'")
@@ -140,7 +140,7 @@ if cuda_available:
     
     # CUDA extensions
     cuda_extension = CUDAExtension(
-        name='tensora._C',
+        name='tensorax._C',
         sources=[
             'csrc/tensor_ops.cpp',
             'csrc/cpu/tensor_cpu.cpp',  # CPU implementations needed too!
@@ -169,7 +169,7 @@ else:
     
     # CPU-only extension
     cpu_extension = Extension(
-        name='tensora._C',
+        name='tensorax._C',
         sources=[
             'csrc/tensor_ops.cpp',
             'csrc/cpu/tensor_cpu.cpp',
@@ -183,15 +183,15 @@ else:
     ext_modules.append(cpu_extension)
 
 setup(
-    name='tensora',
+    name='tensorax',
     version=read_version(),
     author='Shrirang Mahajan',
     author_email='shrirangmahajan123@gmail.com',
     description='A high-performance tensor library with CUDA acceleration',
     long_description=long_description,
     long_description_content_type='text/markdown',
-    url='https://github.com/NotShrirang/tensora',
-    packages=find_packages(exclude=['tests', 'examples', 'docs']) + ['tensora.utils'],
+    url='https://github.com/NotShrirang/tensorax',
+    packages=find_packages(exclude=['tests', 'examples', 'docs']) + ['tensorax.utils'],
     ext_modules=ext_modules,
     cmdclass={
         'build_ext': BuildExtension

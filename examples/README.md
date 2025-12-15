@@ -1,6 +1,6 @@
-# Tensora Examples
+# Tensorax Examples
 
-This directory contains examples demonstrating various features of Tensora.
+This directory contains examples demonstrating various features of Tensorax.
 
 ## Examples
 
@@ -38,7 +38,7 @@ Run: `python examples/cuda_example.py` (requires GPU)
 
 ## Requirements
 
-Install Tensora first:
+Install Tensorax first:
 
 ```bash
 pip install -e .

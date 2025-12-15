@@ -1,9 +1,9 @@
-# Tensora - Project Structure
+# Tensorax - Project Structure
 
 ## 📦 Directory Tree
 
 ```
-tensora/
+tensorax/
 ├── 📄 README.md                      # Main project documentation
 ├── 📄 LICENSE                        # MIT License
 ├── 📄 setup.py                       # Build configuration
@@ -30,7 +30,7 @@ tensora/
 │           ├── 📄 reduction.cu      # Reduction ops (sum, max, etc.)
 │           └── 📄 matmul.cu         # Tiled matrix multiplication
 │
-├── 📁 tensora/                       # Python package
+├── 📁 tensorax/                       # Python package
 │   ├── 📄 __init__.py               # Package initialization
 │   ├── 📄 tensor.py                 # Core Tensor class with autograd
 │   ├── 📄 functional.py             # Functional API (F.relu, losses, etc.)
@@ -80,7 +80,7 @@ tensora/
 - **Losses**: MSE, cross-entropy
 - **Utilities**: random normal distribution, device transfers (CPU↔CUDA)
 
-### 2. Python API (tensora/)
+### 2. Python API (tensorax/)
 
 **Purpose**: User-friendly PyTorch-like interface with automatic differentiation
 
@@ -108,7 +108,7 @@ tensora/
 - `SGD`: Stochastic Gradient Descent with momentum support
 - `Adam`: Adaptive moment estimation with bias correction
 
-### 3. Functional API (tensora/functional.py)
+### 3. Functional API (tensorax/functional.py)
 
 **Purpose**: Stateless operations for functional programming style
 
@@ -159,8 +159,8 @@ tensora/
 
 ```bash
 # Clone repository
-git clone https://github.com/NotShrirang/tensora.git
-cd tensora
+git clone https://github.com/NotShrirang/tensorax.git
+cd tensorax
 
 # Quick build (automatically detects CUDA)
 bash build.sh
@@ -183,7 +183,7 @@ python demo.py
 pytest tests/ -v
 
 # Run with coverage
-pytest tests/ --cov=tensora --cov-report=html
+pytest tests/ --cov=tensorax --cov-report=html
 ```
 
 ### Examples

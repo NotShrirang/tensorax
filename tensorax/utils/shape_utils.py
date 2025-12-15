@@ -2,13 +2,13 @@ from typing import Union, Tuple, Optional, TYPE_CHECKING
 import warnings
 
 try:
-    from tensora import _C
+    from tensorax import _C
 except ImportError as e:
     warnings.warn(f"Failed to import _C module: {e}. Tensor operations will not work until the package is built.")
     _C = None  # Will be available after building
 
-import tensora as ts
-from tensora.utils.type_checks import is_numpy_array
+import tensorax as ts
+from tensorax.utils.type_checks import is_numpy_array
 
 def _compute_size(shape: Tuple[int, ...]) -> int:
     """Compute total number of elements from shape."""

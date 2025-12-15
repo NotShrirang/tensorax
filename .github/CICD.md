@@ -1,10 +1,10 @@
 # CI/CD Documentation
 
-This document describes the Continuous Integration and Continuous Deployment (CI/CD) pipelines configured for the Tensora project.
+This document describes the Continuous Integration and Continuous Deployment (CI/CD) pipelines configured for the Tensorax project.
 
 ## Overview
 
-Tensora uses GitHub Actions for automated testing, code quality checks, and deployment. The CI/CD pipeline ensures code quality, test coverage, and compatibility across different platforms and Python versions.
+Tensorax uses GitHub Actions for automated testing, code quality checks, and deployment. The CI/CD pipeline ensures code quality, test coverage, and compatibility across different platforms and Python versions.
 
 ## Workflows
 
@@ -75,7 +75,7 @@ Tensora uses GitHub Actions for automated testing, code quality checks, and depl
 **Status Badge:**
 
 ```markdown
-[![CI](https://github.com/NotShrirang/tensora/workflows/Tests/badge.svg)](https://github.com/NotShrirang/tensora/actions/workflows/tests.yml)
+[![CI](https://github.com/NotShrirang/tensorax/workflows/Tests/badge.svg)](https://github.com/NotShrirang/tensorax/actions/workflows/tests.yml)
 ```
 
 ---
@@ -106,7 +106,7 @@ Tensora uses GitHub Actions for automated testing, code quality checks, and depl
 **Status Badge:**
 
 ```markdown
-[![Code Coverage](https://github.com/NotShrirang/tensora/workflows/Code%20Coverage/badge.svg)](https://github.com/NotShrirang/tensora/actions/workflows/coverage.yml)
+[![Code Coverage](https://github.com/NotShrirang/tensorax/workflows/Code%20Coverage/badge.svg)](https://github.com/NotShrirang/tensorax/actions/workflows/coverage.yml)
 ```
 
 ---
@@ -253,16 +253,16 @@ Before pushing, test locally to catch issues early:
 pytest tests/ -v
 
 # Check code formatting
-black --check tensora/ tests/
+black --check tensorax/ tests/
 
 # Check import sorting
-isort --check-only tensora/ tests/
+isort --check-only tensorax/ tests/
 
 # Lint code
-flake8 tensora/ tests/
+flake8 tensorax/ tests/
 
 # Generate coverage report
-pytest tests/ --cov=tensora --cov-report=html
+pytest tests/ --cov=tensorax --cov-report=html
 
 # Build distribution
 python -m build
@@ -277,10 +277,10 @@ twine check dist/*
 
 | Workflow   | Status                                                                                                                                                           | Purpose                       |
 | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
-| Tests      | [![Tests](https://github.com/NotShrirang/tensora/workflows/Tests/badge.svg)](https://github.com/NotShrirang/tensora/actions/workflows/tests.yml)                 | Core testing across platforms |
-| Coverage   | [![Coverage](https://github.com/NotShrirang/tensora/workflows/Code%20Coverage/badge.svg)](https://github.com/NotShrirang/tensora/actions/workflows/coverage.yml) | Code coverage tracking        |
-| Benchmarks | ![Benchmarks](https://github.com/NotShrirang/tensora/workflows/Performance%20Benchmarks/badge.svg)                                                               | Performance monitoring        |
-| Publish    | ![Publish](https://github.com/NotShrirang/tensora/workflows/Publish%20to%20PyPI/badge.svg)                                                                       | Package publishing            |
+| Tests      | [![Tests](https://github.com/NotShrirang/tensorax/workflows/Tests/badge.svg)](https://github.com/NotShrirang/tensorax/actions/workflows/tests.yml)                 | Core testing across platforms |
+| Coverage   | [![Coverage](https://github.com/NotShrirang/tensorax/workflows/Code%20Coverage/badge.svg)](https://github.com/NotShrirang/tensorax/actions/workflows/coverage.yml) | Code coverage tracking        |
+| Benchmarks | ![Benchmarks](https://github.com/NotShrirang/tensorax/workflows/Performance%20Benchmarks/badge.svg)                                                               | Performance monitoring        |
+| Publish    | ![Publish](https://github.com/NotShrirang/tensorax/workflows/Publish%20to%20PyPI/badge.svg)                                                                       | Package publishing            |
 
 ---
 

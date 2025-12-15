@@ -5,7 +5,7 @@
 
 #define CEIL_DIV(numerator, denominator) (((numerator) + (denominator) - 1) / (denominator))
 
-namespace tensora {
+namespace tensorax {
     // Simple matrix multiplication kernel (naive implementation)
     __global__ void matmul_kernel_naive(const float* a, const float* b, float* c, int64_t m, int64_t n, int64_t k) {
         int row = blockIdx.y * blockDim.y + threadIdx.y;
@@ -211,4 +211,4 @@ namespace tensora {
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaDeviceSynchronize());
     }
-} // namespace tensora
+} // namespace tensoraxx
