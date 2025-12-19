@@ -3,6 +3,7 @@ pytest-cov>=2.10.0
 black>=21.0
 flake8>=3.9.0
 mypy>=0.900
+numpy==2.3.5
 sphinx>=4.0.0
 sphinx-rtd-theme>=0.5.0
 pybind11>=2.6.0
