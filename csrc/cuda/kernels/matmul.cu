@@ -129,6 +129,52 @@ namespace tensorax {
         }
     }
 
+    template<const int BM, const int BN, const int BK, const int TM>
+    __global__ void matmul_kernel_1d_blocktiling(const float* a, const float* b, float* c, int64_t m, int64_t n, int64_t k, float alpha, float beta) {
+        const uint cRow = blockIdx.y;
+        const uint cCol = blockIdx.x;
+
+        const int threadCol = threadIdx.x % BN;
+        const int threadRow = threadIdx.x / BN;
+
+        __shared__ float shared_a[BM * BK];
+        __shared__ float shared_b[BK * BN];
+
+        a += cRow * BM * k;
+        b += cCol * BN;
+        c += cRow * BM * n + cCol * BN;
+
+        const uint innerColA = threadIdx.x % BK; // warp-level GMEM coalescing
+        const uint innerRowA = threadIdx.x / BK;
+        const uint innerColB = threadIdx.x % BN; // warp-level GMEM coalescing
+        const uint innerRowB = threadIdx.x / BN;
+
+        float threadResults[TM] = {0.0f};
+
+        for (uint bkIdx = 0; bkIdx < k; bkIdx += BK) {
+            shared_a[innerRowA * BK + innerColA] = a[innerRowA * k + innerColA];
+            shared_b[innerRowB * BN + innerColB] = b[innerRowB * n + innerColB];
+
+            __syncthreads();
+
+            a += BK;
+            b += BK * n;
+
+            for (uint dotIdx = 0; dotIdx < BK; ++dotIdx) {
+                float tmpB = shared_b[dotIdx * BN + threadCol];
+                #pragma unroll
+                for (uint resIdx = 0; resIdx < TM; ++resIdx) {
+                    threadResults[resIdx] += shared_a[(threadRow * TM + resIdx) * BK + dotIdx] * tmpB;
+                }
+            }
+            __syncthreads();
+        }
+
+        for (uint resIdx = 0; resIdx < TM; ++resIdx) {
+            c[(threadRow * TM + resIdx) * n + threadCol] = alpha * threadResults[resIdx] + beta * c[(threadRow * TM + resIdx) * n + threadCol];
+        }
+    }
+
     void matmul_cuda(const float* a, const float* b, float* c, int64_t batch_size, int64_t m, int64_t n, int64_t k) {
         // Use naive kernel for simplicity
         dim3 block(cuda::WARP_SIZE, cuda::WARP_SIZE);
@@ -174,7 +220,7 @@ namespace tensorax {
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 
-    void matmul_cuda_shared_memory_coalesced_cuda(const float* a, const float* b, float* c, int64_t batch_size, int64_t m, int64_t n, int64_t k, float alpha, float beta) {
+    void matmul_shared_memory_coalesced_cuda(const float* a, const float* b, float* c, int64_t batch_size, int64_t m, int64_t n, int64_t k, float alpha, float beta) {
         dim3 block(cuda::WARP_SIZE * cuda::WARP_SIZE);
         dim3 grid(CEIL_DIV(n, cuda::WARP_SIZE), CEIL_DIV(m, cuda::WARP_SIZE));
         
@@ -193,7 +239,7 @@ namespace tensorax {
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 
-    void matmul_cuda_shared_memory_cache_blocking_cuda(const float* a, const float* b, float* c, int64_t batch_size, int64_t m, int64_t n, int64_t k, float alpha, float beta) {
+    void matmul_shared_memory_cache_blocking_cuda(const float* a, const float* b, float* c, int64_t batch_size, int64_t m, int64_t n, int64_t k, float alpha, float beta) {
         dim3 block(cuda::WARP_SIZE, cuda::WARP_SIZE);
         dim3 grid(CEIL_DIV(n, cuda::WARP_SIZE), CEIL_DIV(m, cuda::WARP_SIZE));
         
@@ -207,6 +253,35 @@ namespace tensorax {
             const float* b_batch = b + batch * matrix_size_b;
             float* c_batch = c + batch * matrix_size_c;
             matmul_kernel_shared_memory_cache_blocking<<<grid, block>>>(a_batch, b_batch, c_batch, m, n, k, alpha, beta);
+        }
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+    }
+
+    void matmul_1d_blocktiling_cuda(
+        const float* a, const float* b, float* c,
+        int64_t batch_size, int64_t m, int64_t n, int64_t k,
+        float alpha, float beta
+    ) {
+        const uint BM = 64; // Block size for m dimension
+        const uint BN = 64; // Block size for cache blocking
+        const uint BK = 8;  // Block size for k dimension
+        const uint TM = 8;  // Tile size for n dimension within cache block
+
+        dim3 block((BM * BN) / TM);
+        dim3 grid(CEIL_DIV(n, BN), CEIL_DIV(m, BM));
+        
+        int64_t matrix_size_a = m * k;
+        int64_t matrix_size_b = k * n;
+        int64_t matrix_size_c = m * n;
+        
+        // Process each batch
+        for (int64_t batch = 0; batch < batch_size; ++batch) {
+            const float* a_batch = a + batch * matrix_size_a;
+            const float* b_batch = b + batch * matrix_size_b;
+            float* c_batch = c + batch * matrix_size_c;
+            matmul_kernel_1d_blocktiling<BM, BN, BK, TM>
+                <<<grid, block>>>(a_batch, b_batch, c_batch, m, n, k, alpha, beta);
         }
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaDeviceSynchronize());

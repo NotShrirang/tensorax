@@ -361,7 +361,7 @@ class Tensor:
         
         Args:
             other: Another tensor to multiply with
-            method: Method for CUDA matmul ('default', 'shared_memory_coalesced', 'tiled')
+            method: Method for CUDA matmul. Options: ('default', 'shared_memory_coalesced', 'tiled', 'shared_memory_cache_blocking', 'block_tiling_1d')
 
         Returns:
             Resulting tensor from matrix multiplication
@@ -386,7 +386,7 @@ class Tensor:
         result.grad = None
         
         if _C:
-            result._c_tensor = self._matmul(self._c_tensor, other._c_tensor, method=method)
+            result._c_tensor = self._internal_matmul(self._c_tensor, other._c_tensor, method=method)
         
         if self.requires_grad or other.requires_grad:
             result.requires_grad = True
@@ -397,8 +397,8 @@ class Tensor:
         
         return result
     
-    def _matmul(self, a_c_tensor, b_c_tensor, method: str = "default") -> 'Tensor':
-        """Internal method to perform matrix multiplication using C++ backend."""
+    def _internal_matmul(self, a_c_tensor, b_c_tensor, method: str = "default") -> 'Tensor':
+        """Internal method to perform matrix multiplication using C++ backend. Use matmul() instead."""
         if _C:
             if self.device == 'cpu':
                 if method != "default":
@@ -413,6 +413,8 @@ class Tensor:
                     return _C.matmul_tiled(a_c_tensor, b_c_tensor)
                 elif method == "shared_memory_cache_blocking":
                     return _C.matmul_with_shared_memory_cache_blocking(a_c_tensor, b_c_tensor, 1.0, 0.0)
+                elif method == "block_tiling_1d":
+                    return _C.matmul_with_1d_blocktiling(a_c_tensor, b_c_tensor, 1.0, 0.0)
                 else:
                     raise ValueError(f"Unknown matmul method: {method}")
         raise RuntimeError("C++ extension not built. Matrix multiplication not available.")
@@ -438,7 +440,7 @@ class Tensor:
         result.grad = None
         
         if _C:
-            result._c_tensor = self._matmul(self._c_tensor, other._c_tensor)
+            result._c_tensor = self._internal_matmul(self._c_tensor, other._c_tensor)
         
         if self.requires_grad or other.requires_grad:
             result.requires_grad = True

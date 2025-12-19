@@ -2,113 +2,113 @@ name: Performance Benchmarks
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
   schedule:
     # Run benchmarks weekly on Monday at 00:00 UTC
-    - cron: '0 0 * * 1'
+    - cron: "0 0 * * 1"
   workflow_dispatch:
 
 jobs:
   benchmark:
     name: Run Performance Benchmarks
     runs-on: ubuntu-latest
-    
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.12'
-        cache: 'pip'
-    
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential g++ python3-dev
-        python -m pip install --upgrade pip setuptools numpy
-        pip install -r requirements.txt
-        pip install -r requirements-dev.txt
-        pip install pytest-benchmark
-    
-    - name: Build C++ extension
-      run: |
-        python setup.py build_ext --inplace
-        pip install -e .
-    
-    - name: Run benchmarks
-      run: |
-        python -c "
-import time
-import numpy as np
-from tensorax import Tensor
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-print('=' * 60)
-print('TENSORA PERFORMANCE BENCHMARKS')
-print('=' * 60)
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
 
-sizes = [64, 128, 256, 512, 1024]
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential g++ python3-dev
+          python -m pip install --upgrade pip setuptools numpy
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+          pip install pytest-benchmark
 
-for size in sizes:
-    # Matrix multiplication benchmark
-    a = Tensor.randn((size, size))
-    b = Tensor.randn((size, size))
-    
-    start = time.time()
-    c = a @ b
-    end = time.time()
-    
-    elapsed_ms = (end - start) * 1000
-    print(f'Matrix Multiply {size}x{size}: {elapsed_ms:.2f} ms')
+      - name: Build C++ extension
+        run: |
+          python setup.py build_ext --inplace
+          pip install -e .
 
-print('=' * 60)
+      - name: Run benchmarks
+        run: |
+          python -c '
+          import time
+          import numpy as np
+          from tensorax import Tensor
 
-# Element-wise operations
-a = Tensor.randn((1024, 1024))
-b = Tensor.randn((1024, 1024))
+          print("=" * 60)
+          print("TENSORA PERFORMANCE BENCHMARKS")
+          print("=" * 60)
 
-ops = [
-    ('Addition', lambda: a + b),
-    ('Subtraction', lambda: a - b),
-    ('Multiplication', lambda: a * b),
-    ('Division', lambda: a / b),
-]
+          sizes = [64, 128, 256, 512, 1024, 2048, 4096, 8192]
 
-for name, op in ops:
-    start = time.time()
-    result = op()
-    end = time.time()
-    elapsed_ms = (end - start) * 1000
-    print(f'{name} (1024x1024): {elapsed_ms:.2f} ms')
+          for size in sizes:
+              # Matrix multiplication benchmark
+              a = Tensor.randn((size, size))
+              b = Tensor.randn((size, size))
+              
+              start = time.time()
+              c = a @ b
+              end = time.time()
+              
+              elapsed_ms = (end - start) * 1000
+              print(f"Matrix Multiply {size}x{size}: {elapsed_ms:.2f} ms")
 
-print('=' * 60)
+          print("=" * 60)
 
-# Reduction operations
-a = Tensor.randn((1000, 1000))
+          # Element-wise operations
+          a = Tensor.randn((1024, 1024))
+          b = Tensor.randn((1024, 1024))
 
-reductions = [
-    ('Sum', lambda: a.sum()),
-    ('Mean', lambda: a.mean()),
-]
+          ops = [
+              ("Addition", lambda: a + b),
+              ("Subtraction", lambda: a - b),
+              ("Multiplication", lambda: a * b),
+              ("Division", lambda: a / b),
+          ]
 
-for name, op in reductions:
-    start = time.time()
-    result = op()
-    end = time.time()
-    elapsed_ms = (end - start) * 1000
-    print(f'{name} (1000x1000): {elapsed_ms:.2f} ms')
+          for name, op in ops:
+              start = time.time()
+              result = op()
+              end = time.time()
+              elapsed_ms = (end - start) * 1000
+              print(f"{name} (1024x1024): {elapsed_ms:.2f} ms")
 
-print('=' * 60)
-print('Benchmarks Complete!')
-"
-    
-    - name: Upload benchmark results
-      uses: actions/upload-artifact@v4
-      with:
-        name: benchmark-results
-        path: benchmark-*.txt
-        retention-days: 30
-        if-no-files-found: ignore
+          print("=" * 60)
+
+          # Reduction operations
+          a = Tensor.randn((1000, 1000))
+
+          reductions = [
+              ("Sum", lambda: a.sum()),
+              ("Mean", lambda: a.mean()),
+          ]
+
+          for name, op in reductions:
+              start = time.time()
+              result = op()
+              end = time.time()
+              elapsed_ms = (end - start) * 1000
+              print(f"{name} (1000x1000): {elapsed_ms:.2f} ms")
+
+          print("=" * 60)
+          print("Benchmarks Complete!")
+          '
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark-*.txt
+          retention-days: 30
+          if-no-files-found: ignore

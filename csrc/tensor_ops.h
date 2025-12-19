@@ -115,8 +115,9 @@ namespace tensorax
 
     void matmul_cuda(const float *a, const float *b, float *out, int64_t batch_size, int64_t m, int64_t n, int64_t k);
     void matmul_tiled_cuda(const float *a, const float *b, float *out, int64_t batch_size, int64_t m, int64_t n, int64_t k);
-    void matmul_cuda_shared_memory_coalesced_cuda(const float *a, const float *b, float *c, int64_t batch_size, int64_t m, int64_t n, int64_t k, float alpha, float beta);
-    void matmul_cuda_shared_memory_cache_blocking_cuda(const float *a, const float *b, float *c, int64_t batch_size, int64_t m, int64_t n, int64_t k, float alpha, float beta);
+    void matmul_shared_memory_coalesced_cuda(const float *a, const float *b, float *c, int64_t batch_size, int64_t m, int64_t n, int64_t k, float alpha, float beta);
+    void matmul_shared_memory_cache_blocking_cuda(const float *a, const float *b, float *c, int64_t batch_size, int64_t m, int64_t n, int64_t k, float alpha, float beta);
+    void matmul_1d_blocktiling_cuda(const float *a, const float *b, float *c, int64_t batch_size, int64_t m, int64_t n, int64_t k, float alpha, float beta);
 
     void transpose_cuda(const float *in, float *out, int64_t batch_size, int64_t rows, int64_t cols);
 

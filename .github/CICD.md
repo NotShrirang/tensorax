@@ -162,33 +162,7 @@ Tensorax uses GitHub Actions for automated testing, code quality checks, and dep
 
 GitHub Actions are automatically enabled for repositories. Workflows will run on push/PR events.
 
-### 2. Configure Secrets
-
-To enable full CI/CD functionality, add these secrets to your repository:
-
-**Settings → Secrets and variables → Actions → New repository secret**
-
-| Secret Name           | Description          | Required For        |
-| --------------------- | -------------------- | ------------------- |
-| `CODECOV_TOKEN`       | Codecov upload token | Coverage reporting  |
-| `PYPI_API_TOKEN`      | PyPI API token       | Production releases |
-| `TEST_PYPI_API_TOKEN` | Test PyPI API token  | Test releases       |
-
-#### Getting Codecov Token:
-
-1. Sign up at https://codecov.io
-2. Add your repository
-3. Copy the upload token
-4. Add as `CODECOV_TOKEN` secret
-
-#### Getting PyPI Tokens:
-
-1. Create account at https://pypi.org
-2. Go to Account Settings → API tokens
-3. Create token with upload permissions
-4. Add as `PYPI_API_TOKEN` secret
-
-### 3. Branch Protection Rules
+### 2. Branch Protection Rules
 
 **Recommended settings for `main` branch:**
 
@@ -275,12 +249,11 @@ twine check dist/*
 
 ## Workflow Status
 
-| Workflow   | Status                                                                                                                                                           | Purpose                       |
-| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
-| Tests      | [![Tests](https://github.com/NotShrirang/tensorax/workflows/Tests/badge.svg)](https://github.com/NotShrirang/tensorax/actions/workflows/tests.yml)                 | Core testing across platforms |
-| Coverage   | [![Coverage](https://github.com/NotShrirang/tensorax/workflows/Code%20Coverage/badge.svg)](https://github.com/NotShrirang/tensorax/actions/workflows/coverage.yml) | Code coverage tracking        |
-| Benchmarks | ![Benchmarks](https://github.com/NotShrirang/tensorax/workflows/Performance%20Benchmarks/badge.svg)                                                               | Performance monitoring        |
-| Publish    | ![Publish](https://github.com/NotShrirang/tensorax/workflows/Publish%20to%20PyPI/badge.svg)                                                                       | Package publishing            |
+| Workflow | Status                                                                                                                                                             | Purpose                       |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------- |
+| Tests    | [![Tests](https://github.com/NotShrirang/tensorax/workflows/Tests/badge.svg)](https://github.com/NotShrirang/tensorax/actions/workflows/tests.yml)                 | Core testing across platforms |
+| Coverage | [![Coverage](https://github.com/NotShrirang/tensorax/workflows/Code%20Coverage/badge.svg)](https://github.com/NotShrirang/tensorax/actions/workflows/coverage.yml) | Code coverage tracking        |
+| Publish  | [![Publish](https://img.shields.io/pypi/v/tensorax.svg)](https://pypi.org/project/tensorax/)                                                                       | Package publishing            |
 
 ---
 

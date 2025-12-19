@@ -218,13 +218,27 @@ tensorax/
 
 ## ⚡ Performance
 
-Tensorax uses hand-optimized CUDA kernels for maximum performance:
+Tensorax uses hand-optimized CUDA kernels for maximum performance. Here are some benchmark results for matrix multiplication (fp32, 3x1024×1024):
 
-| Operation       | Matrix Size | CPU Time   | CUDA Time | Speedup    |
-| --------------- | ----------- | ---------- | --------- | ---------- |
-| Matrix Multiply | 64×64       | 0.09 ms    | 0.02 ms   | **3.8x**   |
-| Matrix Multiply | 128×128     | 0.83 ms    | 0.05 ms   | **17.1x**  |
-| Matrix Multiply | 1024×1024   | 2382.89 ms | 5.31 ms   | **448.7x** |
+### Matrix Multiplication Benchmark (100 runs)
+
+Comparison of different CUDA kernel implementations vs NumPy and PyTorch:
+
+| Implementation               | Time (seconds) | Relative Performance |
+| ---------------------------- | -------------- | -------------------- |
+| **1D Block Tiling (Best)**   | 0.95           | **2.31x faster**     |
+| Tiled Matrix Multiply        | 1.22           | **1.80x faster**     |
+| NumPy (CPU)                  | 1.85           | Baseline (CPU)       |
+| Shared Memory Cache Blocking | 2.18           | 0.85x                |
+| Default CUDA                 | 3.37           | 0.55x                |
+| Shared Memory Coalescing     | 3.44           | 0.54x                |
+| **PyTorch CUDA (Reference)** | **0.41**       | **4.51x faster**     |
+
+**Key Insights:**
+
+- Our 1D block tiling implementation achieves **2.31x faster** performance than NumPy
+- Performance is **43% of PyTorch's highly optimized CUDA kernels** (room for improvement)
+- Tiled approaches consistently outperform naive implementations by **1.5-3x**
 
 ### Optimization Techniques
 
