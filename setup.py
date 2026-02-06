@@ -148,6 +148,7 @@ if cuda_available:
             'csrc/cuda/kernels/elementwise.cu',
             'csrc/cuda/kernels/reduction.cu',
             'csrc/cuda/kernels/matmul.cu',
+            'csrc/cuda/kernels/attn.cu',
         ],
         include_dirs=[
             'csrc',

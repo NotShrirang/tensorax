@@ -718,6 +718,213 @@ namespace tensorax
         return result;
     }
 
+    // ============================================================================
+    // SCALED DOT-PRODUCT ATTENTION
+    // ============================================================================
+
+    TensorHandle scaled_dot_product_attention(
+        const TensorHandle &query,
+        const TensorHandle &key,
+        const TensorHandle &value,
+        const TensorHandle &mask)
+    {
+        // TODO: Implement scaled_dot_product_attention
+        //
+        // Expected input shapes:
+        //   query: [batch_size, num_heads, seq_len_q, d_k]
+        //   key:   [batch_size, num_heads, seq_len_k, d_k]
+        //   value: [batch_size, num_heads, seq_len_v, d_v]
+        //   mask:  [batch_size, num_heads, seq_len_q, seq_len_k] or nullptr (optional)
+        //
+        // Expected output shape:
+        //   output: [batch_size, num_heads, seq_len_q, d_v]
+        //
+        // Algorithm:
+        //   1. Validate input shapes
+        //   2. Extract dimensions from shapes
+        //   3. Allocate output tensor
+        //   4. Call appropriate backend function (CPU or CUDA)
+        //   5. Return output tensor
+
+        // Step 1: Validate inputs
+        if (query->shape.size() != 4 || key->shape.size() != 4 || value->shape.size() != 4)
+        {
+            throw std::runtime_error("SDPA: Query, Key, Value must be 4D tensors [batch, num_heads, seq_len, d]");
+        }
+
+        if (query->device != key->device || query->device != value->device)
+        {
+            throw std::runtime_error("SDPA: All tensors must be on the same device");
+        }
+
+        if (mask && mask->device != query->device)
+        {
+            throw std::runtime_error("SDPA: Mask must be on the same device as Q, K, V");
+        }
+
+        // Step 2: Extract dimensions
+        int64_t batch_size = query->shape[0];
+        int64_t num_heads = query->shape[1];
+        int64_t seq_len_q = query->shape[2];
+        int64_t d_k = query->shape[3];
+
+        int64_t seq_len_k = key->shape[2];
+        int64_t seq_len_v = value->shape[2];
+        int64_t d_v = value->shape[3];
+
+        // Validate dimensions match
+        if (key->shape[0] != batch_size || key->shape[1] != num_heads || key->shape[3] != d_k)
+        {
+            throw std::runtime_error("SDPA: Key dimensions don't match Query");
+        }
+
+        if (value->shape[0] != batch_size || value->shape[1] != num_heads || seq_len_v != seq_len_k)
+        {
+            throw std::runtime_error("SDPA: Value dimensions don't match Key");
+        }
+
+        if (mask && (mask->shape.size() != 4 ||
+                     mask->shape[0] != batch_size ||
+                     mask->shape[1] != num_heads ||
+                     mask->shape[2] != seq_len_q ||
+                     mask->shape[3] != seq_len_k))
+        {
+            throw std::runtime_error("SDPA: Mask shape must be [batch, num_heads, seq_len_q, seq_len_k]");
+        }
+
+        // Step 3: Allocate output tensor
+        std::vector<int64_t> output_shape = {batch_size, num_heads, seq_len_q, d_v};
+        int64_t output_size = batch_size * num_heads * seq_len_q * d_v;
+        auto result = std::make_shared<TensorImpl>(
+            std::vector<float>(output_size, 0.0f),
+            output_shape,
+            query->dtype,
+            query->device);
+
+        // Step 4: Call backend implementation
+        const float *mask_ptr = mask ? mask->data : nullptr;
+
+        if (query->device == "cpu")
+        {
+            sdpa_cpu(
+                query->data, key->data, value->data, mask_ptr,
+                result->data,
+                batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v);
+        }
+        else if (query->device == "cuda")
+        {
+#ifdef WITH_CUDA
+            sdpa_naive_cuda(
+                query->data, key->data, value->data, mask_ptr,
+                result->data,
+                batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v);
+#else
+            throw std::runtime_error("CUDA support not compiled");
+#endif
+        }
+
+        // Step 5: Return result
+        return result;
+    }
+
+    TensorHandle scaled_dot_product_attention_tiled(
+        const TensorHandle &query,
+        const TensorHandle &key,
+        const TensorHandle &value,
+        const TensorHandle &mask)
+    {
+        if (query->shape.size() != 4 || key->shape.size() != 4 || value->shape.size() != 4)
+            throw std::runtime_error("SDPA: Q, K, V must be 4D tensors");
+        if (query->device != key->device || query->device != value->device)
+            throw std::runtime_error("SDPA: All tensors must be on the same device");
+        if (mask && mask->device != query->device)
+            throw std::runtime_error("SDPA: Mask must be on the same device as Q, K, V");
+
+        int64_t batch_size = query->shape[0];
+        int64_t num_heads = query->shape[1];
+        int64_t seq_len_q = query->shape[2];
+        int64_t d_k = query->shape[3];
+        int64_t seq_len_k = key->shape[2];
+        int64_t d_v = value->shape[3];
+
+        if (key->shape[0] != batch_size || key->shape[1] != num_heads || key->shape[3] != d_k)
+            throw std::runtime_error("SDPA: Key dimensions don't match Query");
+        if (value->shape[0] != batch_size || value->shape[1] != num_heads || value->shape[2] != seq_len_k)
+            throw std::runtime_error("SDPA: Value dimensions don't match Key");
+
+        std::vector<int64_t> output_shape = {batch_size, num_heads, seq_len_q, d_v};
+        int64_t output_size = batch_size * num_heads * seq_len_q * d_v;
+        auto result = std::make_shared<TensorImpl>(
+            std::vector<float>(output_size, 0.0f), output_shape, query->dtype, query->device);
+
+        const float *mask_ptr = mask ? mask->data : nullptr;
+
+        if (query->device == "cpu")
+        {
+            sdpa_cpu(query->data, key->data, value->data, mask_ptr,
+                     result->data, batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v);
+        }
+        else if (query->device == "cuda")
+        {
+#ifdef WITH_CUDA
+            sdpa_tiled_cuda(query->data, key->data, value->data, mask_ptr,
+                            result->data, batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v);
+#else
+            throw std::runtime_error("CUDA support not compiled");
+#endif
+        }
+        return result;
+    }
+
+    TensorHandle scaled_dot_product_attention_flash(
+        const TensorHandle &query,
+        const TensorHandle &key,
+        const TensorHandle &value,
+        const TensorHandle &mask)
+    {
+        if (query->shape.size() != 4 || key->shape.size() != 4 || value->shape.size() != 4)
+            throw std::runtime_error("SDPA: Q, K, V must be 4D tensors");
+        if (query->device != key->device || query->device != value->device)
+            throw std::runtime_error("SDPA: All tensors must be on the same device");
+        if (mask && mask->device != query->device)
+            throw std::runtime_error("SDPA: Mask must be on the same device as Q, K, V");
+
+        int64_t batch_size = query->shape[0];
+        int64_t num_heads = query->shape[1];
+        int64_t seq_len_q = query->shape[2];
+        int64_t d_k = query->shape[3];
+        int64_t seq_len_k = key->shape[2];
+        int64_t d_v = value->shape[3];
+
+        if (key->shape[0] != batch_size || key->shape[1] != num_heads || key->shape[3] != d_k)
+            throw std::runtime_error("SDPA: Key dimensions don't match Query");
+        if (value->shape[0] != batch_size || value->shape[1] != num_heads || value->shape[2] != seq_len_k)
+            throw std::runtime_error("SDPA: Value dimensions don't match Key");
+
+        std::vector<int64_t> output_shape = {batch_size, num_heads, seq_len_q, d_v};
+        int64_t output_size = batch_size * num_heads * seq_len_q * d_v;
+        auto result = std::make_shared<TensorImpl>(
+            std::vector<float>(output_size, 0.0f), output_shape, query->dtype, query->device);
+
+        const float *mask_ptr = mask ? mask->data : nullptr;
+
+        if (query->device == "cpu")
+        {
+            sdpa_cpu(query->data, key->data, value->data, mask_ptr,
+                     result->data, batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v);
+        }
+        else if (query->device == "cuda")
+        {
+#ifdef WITH_CUDA
+            sdpa_flash_cuda(query->data, key->data, value->data, mask_ptr,
+                            result->data, batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v);
+#else
+            throw std::runtime_error("CUDA support not compiled");
+#endif
+        }
+        return result;
+    }
+
     // Loss functions
     TensorHandle mse_loss(const TensorHandle &pred, const TensorHandle &target)
     {
@@ -921,6 +1128,17 @@ PYBIND11_MODULE(_C, m)
     m.def("sigmoid", &tensorax::sigmoid);
     m.def("tanh", &tensorax::tanh_op);
     m.def("softmax", &tensorax::softmax);
+
+    // Attention
+    m.def("scaled_dot_product_attention", &tensorax::scaled_dot_product_attention,
+          py::arg("query"), py::arg("key"), py::arg("value"), py::arg("mask") = nullptr,
+          "Scaled Dot-Product Attention: softmax(Q @ K^T / sqrt(d_k)) @ V");
+    m.def("scaled_dot_product_attention_tiled", &tensorax::scaled_dot_product_attention_tiled,
+          py::arg("query"), py::arg("key"), py::arg("value"), py::arg("mask") = nullptr,
+          "Scaled Dot-Product Attention (tiled shared memory kernel)");
+    m.def("scaled_dot_product_attention_flash", &tensorax::scaled_dot_product_attention_flash,
+          py::arg("query"), py::arg("key"), py::arg("value"), py::arg("mask") = nullptr,
+          "Scaled Dot-Product Attention (flash attention kernel)");
 
     // Losses
     m.def("mse_loss", &tensorax::mse_loss);

@@ -3,6 +3,7 @@ Functional API for tensor operations.
 Pure C++/CUDA backend - no NumPy dependency.
 """
 
+from typing import Optional
 from .tensor import Tensor
 try:
     from . import _C
@@ -213,3 +214,124 @@ def cross_entropy_from_logits(logits: Tensor, targets: Tensor, reduce_mean: bool
         result._grad_fn = None
     
     return result
+
+
+
+def scaled_dot_product_attention(query: Tensor, key: Tensor, value: Tensor, mask: Optional[Tensor] = None) -> Tensor:
+    """
+    Scaled Dot-Product Attention.
+    
+    Computes: Attention(Q, K, V) = softmax(Q @ K^T / sqrt(d_k)) @ V
+    
+    Args:
+        query: Query tensor [batch_size, num_heads, seq_len_q, d_k]
+        key: Key tensor [batch_size, num_heads, seq_len_k, d_k]
+        value: Value tensor [batch_size, num_heads, seq_len_v, d_v]
+        mask: Optional attention mask [batch_size, num_heads, seq_len_q, seq_len_k]
+              Use -inf to mask out positions (they'll become 0 after softmax)
+    
+    Returns:
+        output: Attention output [batch_size, num_heads, seq_len_q, d_v]
+    
+    Example:
+        >>> batch, heads, seq_len, d_k, d_v = 2, 8, 10, 64, 64
+        >>> Q = Tensor.randn(batch, heads, seq_len, d_k)
+        >>> K = Tensor.randn(batch, heads, seq_len, d_k)
+        >>> V = Tensor.randn(batch, heads, seq_len, d_v)
+        >>> out = F.scaled_dot_product_attention(Q, K, V)
+        >>> out.shape  # [2, 8, 10, 64]
+    """
+    # TODO: Implement Python wrapper for scaled_dot_product_attention
+    # 
+    # Steps:
+    # 1. Validate inputs (shape, device compatibility)
+    # 2. Create result tensor with proper shape
+    # 3. Call C++ backend through _C module
+    # 4. Set up gradient function if requires_grad=True
+    # 5. Return result
+    
+    # Validate shapes
+    if len(query.shape) != 4 or len(key.shape) != 4 or len(value.shape) != 4:
+        raise ValueError("Query, Key, and Value must be 4D tensors [batch, heads, seq_len, d]")
+    
+    if query.device != key.device or query.device != value.device:
+        raise ValueError("All tensors must be on the same device")
+    
+    if mask is not None and mask.device != query.device:
+        raise ValueError("Mask must be on the same device as Q, K, V")
+    
+    # Extract dimensions
+    batch_size = query.shape[0]
+    num_heads = query.shape[1]
+    seq_len_q = query.shape[2]
+    d_k = query.shape[3]
+    d_v = value.shape[3]
+    
+    # Create result tensor
+    result = Tensor.__new__(Tensor)
+    result._shape = (batch_size, num_heads, seq_len_q, d_v)
+    result._size = batch_size * num_heads * seq_len_q * d_v
+    result.dtype = query.dtype
+    result.device = query.device
+    result.grad = None
+    
+    # Call C++ backend
+    if _C:
+        mask_c_tensor = mask._c_tensor if mask is not None else None
+        result._c_tensor = _C.scaled_dot_product_attention(
+            query._c_tensor,
+            key._c_tensor,
+            value._c_tensor,
+            mask_c_tensor
+        )
+    else:
+        raise RuntimeError("C++ backend not available. Please build the package first.")
+    
+    # Set up autograd
+    if query.requires_grad or key.requires_grad or value.requires_grad:
+        result.requires_grad = True
+        result._grad_fn = ('scaled_dot_product_attention', query, key, value, mask)
+    else:
+        result.requires_grad = False
+        result._grad_fn = None
+
+    return result
+
+
+def _sdpa_variant(query: Tensor, key: Tensor, value: Tensor, mask: Optional[Tensor], backend_fn):
+    if len(query.shape) != 4 or len(key.shape) != 4 or len(value.shape) != 4:
+        raise ValueError("Query, Key, and Value must be 4D tensors [batch, heads, seq_len, d]")
+    if query.device != key.device or query.device != value.device:
+        raise ValueError("All tensors must be on the same device")
+    if mask is not None and mask.device != query.device:
+        raise ValueError("Mask must be on the same device as Q, K, V")
+
+    batch_size = query.shape[0]
+    num_heads = query.shape[1]
+    seq_len_q = query.shape[2]
+    d_v = value.shape[3]
+
+    result = Tensor.__new__(Tensor)
+    result._shape = (batch_size, num_heads, seq_len_q, d_v)
+    result._size = batch_size * num_heads * seq_len_q * d_v
+    result.dtype = query.dtype
+    result.device = query.device
+    result.grad = None
+
+    if _C:
+        mask_c = mask._c_tensor if mask is not None else None
+        result._c_tensor = backend_fn(query._c_tensor, key._c_tensor, value._c_tensor, mask_c)
+    else:
+        raise RuntimeError("C++ backend not available.")
+
+    result.requires_grad = False
+    result._grad_fn = None
+    return result
+
+
+def scaled_dot_product_attention_tiled(query: Tensor, key: Tensor, value: Tensor, mask: Optional[Tensor] = None) -> Tensor:
+    return _sdpa_variant(query, key, value, mask, _C.scaled_dot_product_attention_tiled)
+
+
+def scaled_dot_product_attention_flash(query: Tensor, key: Tensor, value: Tensor, mask: Optional[Tensor] = None) -> Tensor:
+    return _sdpa_variant(query, key, value, mask, _C.scaled_dot_product_attention_flash)
