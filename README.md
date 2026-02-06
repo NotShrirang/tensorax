@@ -179,6 +179,34 @@ for epoch in range(100):
         print(f'Epoch {epoch}: Loss = {loss.tolist()[0]:.4f}')
 ```
 
+### Scaled Dot-Product Attention
+
+```python
+from tensorax import Tensor, functional as F
+from tensorax.nn.attention import ScaledDotProductAttention, create_causal_mask
+
+batch, heads, seq_len, d_k = 2, 8, 64, 64
+
+Q = Tensor.randn((batch, heads, seq_len, d_k))
+K = Tensor.randn((batch, heads, seq_len, d_k))
+V = Tensor.randn((batch, heads, seq_len, d_k))
+
+# Basic attention
+out = F.scaled_dot_product_attention(Q, K, V)
+
+# Causal (autoregressive) attention
+mask = create_causal_mask(seq_len, batch_size=batch, num_heads=heads)
+out = F.scaled_dot_product_attention(Q, K, V, mask=mask)
+
+# Layer-based usage
+attn = ScaledDotProductAttention()
+out = attn(Q, K, V, mask=mask)
+
+# GPU acceleration
+if Tensor.cuda_is_available():
+    out = F.scaled_dot_product_attention(Q.cuda(), K.cuda(), V.cuda())
+```
+
 ### Functional API
 
 ```python
@@ -202,18 +230,23 @@ loss = F.mse_loss(pred, target)  # Mean squared error
 
 ```
 tensorax/
-├── csrc/              # C++ and CUDA source code
-│   ├── cuda/         # CUDA implementations
-│   ├── cpu/          # CPU implementations
-│   └── tensor_ops.*  # Core operations
-├── tensorax/          # Python package
-│   ├── tensor.py     # Tensor class
-│   ├── nn/          # Neural network modules
-│   ├── functional.py # Functional API
-│   └── optim.py     # Optimizers
-├── tests/           # Test suite
-├── examples/        # Usage examples
-└── docs/           # Documentation
+├── csrc/                      # C++ and CUDA source code
+│   ├── cuda/kernels/         # CUDA kernel implementations
+│   │   ├── elementwise.cu    # Element-wise operations
+│   │   ├── reduction.cu      # Sum, mean, max reductions
+│   │   ├── matmul.cu         # Matrix multiplication (6 variants)
+│   │   └── attn.cu           # Attention kernels (naive, tiled, flash)
+│   ├── cpu/                  # CPU implementations
+│   └── tensor_ops.*          # Core operations and pybind11 bindings
+├── tensorax/                  # Python package
+│   ├── tensor.py             # Tensor class
+│   ├── functional.py         # Functional API (relu, softmax, sdpa, ...)
+│   ├── nn/                   # Neural network modules
+│   │   └── attention/        # Attention layers and utilities
+│   └── optim.py              # Optimizers
+├── tests/                    # Test suite
+├── examples/                 # Usage examples
+└── docs/                     # Documentation
 ```
 
 ## ⚡ Performance
@@ -240,12 +273,25 @@ Comparison of different CUDA kernel implementations vs NumPy and PyTorch:
 - Performance is **43% of PyTorch's highly optimized CUDA kernels** (room for improvement)
 - Tiled approaches consistently outperform naive implementations by **1.5-3x**
 
+### Attention Kernels
+
+Tensorax includes three hand-written CUDA attention kernels with no cuBLAS or library dependencies:
+
+| Kernel | Technique | Best For |
+| ------ | --------- | -------- |
+| **Naive** | One thread per output element, three-pass softmax | Small sequences, correctness baseline |
+| **Tiled** | Shared memory K/V tiles, online softmax | Medium sequences |
+| **Flash** | Block Q/K/V tiling, online softmax with rescaling | Long sequences, memory efficiency |
+
+All kernels support arbitrary batch size, head count, asymmetric sequence lengths (`seq_q != seq_k`), separate `d_k`/`d_v`, and optional additive attention masks.
+
 ### Optimization Techniques
 
 - ✅ **Coalesced memory access** for elementwise operations
 - ✅ **Tiled matrix multiplication** with shared memory
 - ✅ **Efficient parallel reductions** for sum/max operations
 - ✅ **Kernel fusion** to minimize memory transfers
+- ✅ **Flash Attention** with online softmax for O(1) memory in sequence length
 
 ## Documentation
 
@@ -367,10 +413,19 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 - [x] **Cross Entropy Loss**: From probabilities or logits
 - [x] **Backward pass**: All loss functions support gradient computation
 
+### Attention ✅
+
+- [x] **Scaled Dot-Product Attention**: `softmax(Q @ K^T / sqrt(d_k)) @ V`
+- [x] **Three CUDA kernels**: Naive, tiled (shared memory), flash (online softmax)
+- [x] **CPU reference**: Pure C implementation for validation and CPU-only builds
+- [x] **Attention masks**: Causal masks, padding masks, and custom additive masks
+- [x] **Cross-attention**: Supports `seq_len_q != seq_len_k` and `d_k != d_v`
+
 ### Functional API ✅
 
 - [x] **Activations**: relu, sigmoid, tanh, softmax (multi-dimensional)
 - [x] **Loss functions**: mse_loss, cross_entropy_loss, cross_entropy_from_logits
+- [x] **Attention**: scaled_dot_product_attention with optional mask
 - [x] **Linear transformation**: Functional linear with optional bias
 - [x] **Gradient support**: All functions support backpropagation
 
@@ -387,15 +442,18 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 - [x] Device management (CPU/CUDA)
 - [x] Comprehensive test suite (229 tests passing)
 - [x] Tensor serialization (save/load)
+- [x] Scaled dot-product attention (naive, tiled, flash CUDA kernels)
 
 ### In Progress 🚧
 
+- [ ] Multi-head attention layer with linear projections
 - [ ] CUDA kernel optimization for all operations
 - [ ] Documentation improvements
 - [ ] Performance benchmarking suite
 
 ### Future Features 🔮
 
+- [ ] Transformer encoder/decoder blocks
 - [ ] Convolution and pooling layers (Conv2D, MaxPool2D)
 - [ ] Batch normalization and Layer normalization
 - [ ] More activation functions (LeakyReLU, GELU, Swish, ELU)

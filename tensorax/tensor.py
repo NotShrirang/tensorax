@@ -760,6 +760,33 @@ class Tensor:
         
         return result
     
+    def transpose(self, dim0: int, dim1: int) -> 'Tensor':
+        """Transpose two specified dimensions."""
+        if dim0 < 0 or dim0 >= len(self._shape) or dim1 < 0 or dim1 >= len(self._shape):
+            raise ValueError(f"Dimension out of range (expected to be in range of [0, {len(self._shape)-1}], but got {dim0} and {dim1})")
+        
+        result = Tensor.__new__(Tensor)
+        result_shape = list(self._shape)
+        result_shape[dim0], result_shape[dim1] = result_shape[dim1], result_shape[dim0]
+        result._shape = tuple(result_shape)
+        result._size = self._size
+        result.dtype = self.dtype
+        result.device = self.device
+        result.grad = None
+        
+        if _C:
+            result._c_tensor = _C.transpose_dims(self._c_tensor, dim0, dim1)
+        
+        # Track gradient through transpose
+        if self.requires_grad:
+            result.requires_grad = True
+            result._grad_fn = ('transpose', self, dim0, dim1)
+        else:
+            result.requires_grad = False
+            result._grad_fn = None
+        
+        return result
+    
     def sqrt(self) -> 'Tensor':
         """Element-wise square root."""
         result = Tensor.__new__(Tensor)

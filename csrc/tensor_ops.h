@@ -58,6 +58,25 @@ namespace tensorax
     TensorHandle tanh_op(const TensorHandle &x);
     TensorHandle softmax(const TensorHandle &x, int64_t dim);
 
+    // Scaled Dot-Product Attention
+    TensorHandle scaled_dot_product_attention(
+        const TensorHandle &query,
+        const TensorHandle &key,
+        const TensorHandle &value,
+        const TensorHandle &mask = nullptr);
+
+    TensorHandle scaled_dot_product_attention_tiled(
+        const TensorHandle &query,
+        const TensorHandle &key,
+        const TensorHandle &value,
+        const TensorHandle &mask = nullptr);
+
+    TensorHandle scaled_dot_product_attention_flash(
+        const TensorHandle &query,
+        const TensorHandle &key,
+        const TensorHandle &value,
+        const TensorHandle &mask = nullptr);
+
     TensorHandle mse_loss(const TensorHandle &pred, const TensorHandle &target);
     TensorHandle cross_entropy_loss(const TensorHandle &pred, const TensorHandle &target);
     TensorHandle cross_entropy_from_logits(const TensorHandle &logits, const TensorHandle &targets, bool reduce_mean = true);
@@ -93,6 +112,10 @@ namespace tensorax
     void log_cpu(const float *in, float *out, int64_t size);
     void exp_cpu(const float *in, float *out, int64_t size);
 
+    void sdpa_cpu(const float *Q, const float *K, const float *V, const float *mask,
+                  float *out, int64_t batch_size, int64_t num_heads,
+                  int64_t seq_len_q, int64_t seq_len_k, int64_t d_k, int64_t d_v);
+
 #ifdef WITH_CUDA
     void add_cuda(const float *a, const float *b, float *out, int64_t size);
     void broadcasting_add_cuda(const float *a, const float *b, float *out,
@@ -121,6 +144,20 @@ namespace tensorax
     void matmul_2d_blocktiling_cuda(const float *a, const float *b, float *c, int64_t batch_size, int64_t m, int64_t n, int64_t k, float alpha, float beta);
 
     void transpose_cuda(const float *in, float *out, int64_t batch_size, int64_t rows, int64_t cols);
+
+    // Scaled Dot-Product Attention (SDPA)
+    // Attention(Q, K, V) = softmax(Q @ K^T / sqrt(d_k)) @ V
+    void sdpa_naive_cuda(const float *Q, const float *K, const float *V, const float *mask,
+                         float *out, int64_t batch_size, int64_t num_heads,
+                         int64_t seq_len_q, int64_t seq_len_k, int64_t d_k, int64_t d_v);
+
+    void sdpa_tiled_cuda(const float *Q, const float *K, const float *V, const float *mask,
+                         float *out, int64_t batch_size, int64_t num_heads,
+                         int64_t seq_len_q, int64_t seq_len_k, int64_t d_k, int64_t d_v);
+
+    void sdpa_flash_cuda(const float *Q, const float *K, const float *V, const float *mask,
+                         float *out, int64_t batch_size, int64_t num_heads,
+                         int64_t seq_len_q, int64_t seq_len_k, int64_t d_k, int64_t d_v);
 
     void *cuda_malloc(size_t size);
     void cuda_free(void *ptr);

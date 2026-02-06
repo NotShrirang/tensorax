@@ -1,5 +1,6 @@
 #include "../tensor_ops.h"
 #include <cmath>
+#include <cfloat>
 #include <algorithm>
 #include <stdexcept>
 
@@ -460,4 +461,71 @@ namespace tensorax
             out[i] = std::exp(in[i]);
         }
     }
+    void sdpa_cpu(
+        const float *Q,
+        const float *K,
+        const float *V,
+        const float *mask,
+        float *out,
+        int64_t batch_size,
+        int64_t num_heads,
+        int64_t seq_len_q,
+        int64_t seq_len_k,
+        int64_t d_k,
+        int64_t d_v
+    ) {
+        float scale = 1.0f / std::sqrt(static_cast<float>(d_k));
+
+        for (int64_t b = 0; b < batch_size; b++) {
+            for (int64_t h = 0; h < num_heads; h++) {
+                int64_t qkv_base = b * num_heads + h;
+                const float *q_ptr = Q + qkv_base * seq_len_q * d_k;
+                const float *k_ptr = K + qkv_base * seq_len_k * d_k;
+                const float *v_ptr = V + qkv_base * seq_len_k * d_v;
+                const float *m_ptr = mask ? mask + qkv_base * seq_len_q * seq_len_k : nullptr;
+                float *o_ptr = out + qkv_base * seq_len_q * d_v;
+
+                for (int64_t i = 0; i < seq_len_q; i++) {
+                    float max_score = -FLT_MAX;
+                    for (int64_t j = 0; j < seq_len_k; j++) {
+                        float score = 0.0f;
+                        for (int64_t d = 0; d < d_k; d++) {
+                            score += q_ptr[i * d_k + d] * k_ptr[j * d_k + d];
+                        }
+                        score *= scale;
+                        if (m_ptr) score += m_ptr[i * seq_len_k + j];
+                        if (score > max_score) max_score = score;
+                    }
+
+                    float sum_exp = 0.0f;
+                    float *attn = new float[seq_len_k];
+                    for (int64_t j = 0; j < seq_len_k; j++) {
+                        float score = 0.0f;
+                        for (int64_t d = 0; d < d_k; d++) {
+                            score += q_ptr[i * d_k + d] * k_ptr[j * d_k + d];
+                        }
+                        score *= scale;
+                        if (m_ptr) score += m_ptr[i * seq_len_k + j];
+                        attn[j] = std::exp(score - max_score);
+                        sum_exp += attn[j];
+                    }
+
+                    for (int64_t j = 0; j < seq_len_k; j++) {
+                        attn[j] /= sum_exp;
+                    }
+
+                    for (int64_t d = 0; d < d_v; d++) {
+                        float val = 0.0f;
+                        for (int64_t j = 0; j < seq_len_k; j++) {
+                            val += attn[j] * v_ptr[j * d_v + d];
+                        }
+                        o_ptr[i * d_v + d] = val;
+                    }
+
+                    delete[] attn;
+                }
+            }
+        }
+    }
+
 } // namespace tensoraxx
