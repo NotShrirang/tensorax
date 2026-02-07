@@ -74,8 +74,6 @@ __global__ void sdpa_kernel_naive(
     out[qkv_base * seq_len_q * d_v + q_idx * d_v + v_idx] = result;
 }
 
-#define TILE_K_ATTN 32
-
 __global__ void sdpa_kernel_tiled(
     const float* __restrict__ Q,
     const float* __restrict__ K,
@@ -88,7 +86,8 @@ __global__ void sdpa_kernel_tiled(
     int seq_len_k,
     int d_k,
     int d_v,
-    float scale
+    float scale,
+    int tile_k
 ) {
     int b = blockIdx.z / num_heads;
     int h = blockIdx.z % num_heads;
@@ -106,14 +105,14 @@ __global__ void sdpa_kernel_tiled(
 
     extern __shared__ float smem[];
     float* s_k = smem;
-    float* s_v = s_k + TILE_K_ATTN * d_k;
+    float* s_v = s_k + tile_k * d_k;
 
     float max_score = -FLT_MAX;
     float sum_exp = 0.0f;
     float acc = 0.0f;
 
-    for (int tile_start = 0; tile_start < seq_len_k; tile_start += TILE_K_ATTN) {
-        int tile_end = min(tile_start + TILE_K_ATTN, seq_len_k);
+    for (int tile_start = 0; tile_start < seq_len_k; tile_start += tile_k) {
+        int tile_end = min(tile_start + tile_k, seq_len_k);
         int tile_len = tile_end - tile_start;
 
         for (int i = threadIdx.y; i < tile_len; i += blockDim.y) {
@@ -152,9 +151,6 @@ __global__ void sdpa_kernel_tiled(
     }
 }
 
-#define FLASH_BR 32
-#define FLASH_BC 32
-
 __global__ void sdpa_kernel_flash(
     const float* __restrict__ Q,
     const float* __restrict__ K,
@@ -167,12 +163,14 @@ __global__ void sdpa_kernel_flash(
     int seq_len_k,
     int d_k,
     int d_v,
-    float scale
+    float scale,
+    int br,
+    int bc
 ) {
     int b = blockIdx.z / num_heads;
     int h = blockIdx.z % num_heads;
     int q_block = blockIdx.y;
-    int q_start = q_block * FLASH_BR;
+    int q_start = q_block * br;
 
     if (b >= batch_size || h >= num_heads)
         return;
@@ -188,14 +186,14 @@ __global__ void sdpa_kernel_flash(
 
     extern __shared__ float flash_smem[];
     float* s_q = flash_smem;
-    float* s_k = s_q + FLASH_BR * d_k;
-    float* s_v = s_k + FLASH_BC * d_k;
-    float* s_scores = s_v + FLASH_BC * d_v;
-    float* s_o = s_scores + FLASH_BR * FLASH_BC;
-    float* s_m = s_o + FLASH_BR * d_v;
-    float* s_l = s_m + FLASH_BR;
+    float* s_k = s_q + br * d_k;
+    float* s_v = s_k + bc * d_k;
+    float* s_scores = s_v + bc * d_v;
+    float* s_o = s_scores + br * bc;
+    float* s_m = s_o + br * d_v;
+    float* s_l = s_m + br;
 
-    int q_end = min(q_start + FLASH_BR, seq_len_q);
+    int q_end = min(q_start + br, seq_len_q);
     int q_len = q_end - q_start;
 
     for (int i = tid; i < q_len * d_k; i += blockDim.x) {
@@ -212,8 +210,8 @@ __global__ void sdpa_kernel_flash(
     }
     __syncthreads();
 
-    for (int kv_start = 0; kv_start < seq_len_k; kv_start += FLASH_BC) {
-        int kv_end = min(kv_start + FLASH_BC, seq_len_k);
+    for (int kv_start = 0; kv_start < seq_len_k; kv_start += bc) {
+        int kv_end = min(kv_start + bc, seq_len_k);
         int kv_len = kv_end - kv_start;
 
         for (int i = tid; i < kv_len * d_k; i += blockDim.x) {
@@ -240,7 +238,7 @@ __global__ void sdpa_kernel_flash(
                 }
                 score *= scale;
                 if (mask_base) score += mask_base[(q_start + qi) * seq_len_k + kv_start + kj];
-                s_scores[qi * FLASH_BC + kj] = score;
+                s_scores[qi * bc + kj] = score;
                 if (score > new_max) new_max = score;
             }
 
@@ -252,7 +250,7 @@ __global__ void sdpa_kernel_flash(
             }
 
             for (int kj = 0; kj < kv_len; kj++) {
-                float p = expf(s_scores[qi * FLASH_BC + kj] - new_max);
+                float p = expf(s_scores[qi * bc + kj] - new_max);
                 new_sum += p;
                 for (int d = 0; d < d_v; d++) {
                     s_o[qi * d_v + d] += p * s_v[kj * d_v + d];
@@ -317,6 +315,7 @@ void sdpa_tiled_cuda(
     int64_t d_v
 ) {
     float scale = 1.0f / sqrtf(static_cast<float>(d_k));
+    int tile_k = cuda::compute_tiled_tile_k(d_k, d_v);
 
     dim3 block(16, 16);
     dim3 grid(
@@ -325,11 +324,11 @@ void sdpa_tiled_cuda(
         batch_size * num_heads
     );
 
-    size_t smem_size = (TILE_K_ATTN * d_k + TILE_K_ATTN * d_v) * sizeof(float);
+    size_t smem_size = ((size_t)tile_k * d_k + (size_t)tile_k * d_v) * sizeof(float);
 
     sdpa_kernel_tiled<<<grid, block, smem_size>>>(
         Q, K, V, mask, out,
-        batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v, scale
+        batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v, scale, tile_k
     );
 
     CUDA_CHECK(cudaGetLastError());
@@ -350,26 +349,28 @@ void sdpa_flash_cuda(
     int64_t d_v
 ) {
     float scale = 1.0f / sqrtf(static_cast<float>(d_k));
+    int br, bc;
+    cuda::compute_flash_tiles(d_k, d_v, br, bc);
 
     int threads = 128;
     dim3 block(threads);
     dim3 grid(
         1,
-        CEIL_DIV(seq_len_q, FLASH_BR),
+        CEIL_DIV(seq_len_q, br),
         batch_size * num_heads
     );
 
-    size_t smem_size = (FLASH_BR * d_k
-                      + FLASH_BC * d_k
-                      + FLASH_BC * d_v
-                      + FLASH_BR * FLASH_BC
-                      + FLASH_BR * d_v
-                      + FLASH_BR
-                      + FLASH_BR) * sizeof(float);
+    size_t smem_size = ((size_t)br * d_k
+                      + (size_t)bc * d_k
+                      + (size_t)bc * d_v
+                      + (size_t)br * bc
+                      + (size_t)br * d_v
+                      + (size_t)br
+                      + (size_t)br) * sizeof(float);
 
     sdpa_kernel_flash<<<grid, block, smem_size>>>(
         Q, K, V, mask, out,
-        batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v, scale
+        batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v, scale, br, bc
     );
 
     CUDA_CHECK(cudaGetLastError());
