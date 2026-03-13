@@ -925,6 +925,55 @@ namespace tensorax
         return result;
     }
 
+    TensorHandle scaled_dot_product_attention_flash_optimized(
+        const TensorHandle &query,
+        const TensorHandle &key,
+        const TensorHandle &value,
+        const TensorHandle &mask)
+    {
+        if (query->shape.size() != 4 || key->shape.size() != 4 || value->shape.size() != 4)
+            throw std::runtime_error("SDPA: Q, K, V must be 4D tensors");
+        if (query->device != key->device || query->device != value->device)
+            throw std::runtime_error("SDPA: All tensors must be on the same device");
+        if (mask && mask->device != query->device)
+            throw std::runtime_error("SDPA: Mask must be on the same device as Q, K, V");
+
+        int64_t batch_size = query->shape[0];
+        int64_t num_heads = query->shape[1];
+        int64_t seq_len_q = query->shape[2];
+        int64_t d_k = query->shape[3];
+        int64_t seq_len_k = key->shape[2];
+        int64_t d_v = value->shape[3];
+
+        if (key->shape[0] != batch_size || key->shape[1] != num_heads || key->shape[3] != d_k)
+            throw std::runtime_error("SDPA: Key dimensions don't match Query");
+        if (value->shape[0] != batch_size || value->shape[1] != num_heads || value->shape[2] != seq_len_k)
+            throw std::runtime_error("SDPA: Value dimensions don't match Key");
+
+        std::vector<int64_t> output_shape = {batch_size, num_heads, seq_len_q, d_v};
+        int64_t output_size = batch_size * num_heads * seq_len_q * d_v;
+        auto result = std::make_shared<TensorImpl>(
+            std::vector<float>(output_size, 0.0f), output_shape, query->dtype, query->device);
+
+        const float *mask_ptr = mask ? mask->data : nullptr;
+
+        if (query->device == "cpu")
+        {
+            sdpa_cpu(query->data, key->data, value->data, mask_ptr,
+                     result->data, batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v);
+        }
+        else if (query->device == "cuda")
+        {
+#ifdef WITH_CUDA
+            sdpa_optimized_flash_cuda(query->data, key->data, value->data, mask_ptr,
+                            result->data, batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v);
+#else
+            throw std::runtime_error("CUDA support not compiled");
+#endif
+        }
+        return result;
+    }
+
     // Loss functions
     TensorHandle mse_loss(const TensorHandle &pred, const TensorHandle &target)
     {
@@ -1139,6 +1188,9 @@ PYBIND11_MODULE(_C, m)
     m.def("scaled_dot_product_attention_flash", &tensorax::scaled_dot_product_attention_flash,
           py::arg("query"), py::arg("key"), py::arg("value"), py::arg("mask") = nullptr,
           "Scaled Dot-Product Attention (flash attention kernel)");
+    m.def("scaled_dot_product_attention_flash_optimized", &tensorax::scaled_dot_product_attention_flash_optimized,
+            py::arg("query"), py::arg("key"), py::arg("value"), py::arg("mask") = nullptr,
+            "Scaled Dot-Product Attention (optimized flash attention kernel)");
 
     // Losses
     m.def("mse_loss", &tensorax::mse_loss);

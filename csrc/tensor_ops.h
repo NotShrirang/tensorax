@@ -76,6 +76,12 @@ namespace tensorax
         const TensorHandle &key,
         const TensorHandle &value,
         const TensorHandle &mask = nullptr);
+    
+    TensorHandle scaled_dot_product_attention_flash_optimized(
+        const TensorHandle &query,
+        const TensorHandle &key,
+        const TensorHandle &value,
+        const TensorHandle &mask = nullptr);
 
     TensorHandle mse_loss(const TensorHandle &pred, const TensorHandle &target);
     TensorHandle cross_entropy_loss(const TensorHandle &pred, const TensorHandle &target);
@@ -158,6 +164,10 @@ namespace tensorax
     void sdpa_flash_cuda(const float *Q, const float *K, const float *V, const float *mask,
                          float *out, int64_t batch_size, int64_t num_heads,
                          int64_t seq_len_q, int64_t seq_len_k, int64_t d_k, int64_t d_v);
+
+    void sdpa_optimized_flash_cuda(const float *Q, const float *K, const float *V, const float *mask,
+                                  float *out, int64_t batch_size, int64_t num_heads,
+                                  int64_t seq_len_q, int64_t seq_len_k, int64_t d_k, int64_t d_v);
 
     void *cuda_malloc(size_t size);
     void cuda_free(void *ptr);
