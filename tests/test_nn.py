@@ -221,6 +221,13 @@ class TestSequential:
 class TestModuleBase:
     """Test base Module functionality."""
 
+    def test_base_module_forward_not_implemented(self):
+        from tensorax.nn.module import Module
+
+        module = Module()
+        with pytest.raises(NotImplementedError):
+            module.forward()
+
     def test_module_parameters(self):
         model = nn.Linear(10, 5)
         params = list(model.parameters())
@@ -318,6 +325,68 @@ class TestModuleBase:
         seq = nn.Sequential(nn.Linear(10, 5), nn.Linear(5, 2))
         params = list(seq.parameters())
         assert len(params) == 4
+
+    def test_parameters_skip_none_modules(self):
+        from tensorax.nn.module import Module
+
+        parent = Module()
+        parent._parameters["empty"] = None
+        parent._modules["none_child"] = None
+        parent._modules["linear"] = nn.Linear(2, 1)
+
+        params = list(parent.parameters())
+        assert len(params) == 2
+
+    def test_module_cuda_and_cpu_recurse_children(self):
+        from tensorax.nn.module import Module
+
+        class ChildModule(Module):
+            def __init__(self):
+                super().__init__()
+                self.cuda_called = False
+                self.cpu_called = False
+
+            def forward(self, x):
+                return x
+
+            def cuda(self):
+                self.cuda_called = True
+                return self
+
+            def cpu(self):
+                self.cpu_called = True
+                return self
+
+        parent = Module()
+        child = ChildModule()
+        parent._modules["child"] = child
+
+        parent.cuda()
+        parent.cpu()
+
+        assert child.cuda_called is True
+        assert child.cpu_called is True
+
+    def test_module_to_cuda_branch_uses_cuda_method(self):
+        from tensorax.nn.module import Module
+
+        class MarkerModule(Module):
+            def __init__(self):
+                super().__init__()
+                self.marker = False
+
+            def forward(self, x):
+                return x
+
+            def cuda(self):
+                self.marker = True
+                return self
+
+        module = MarkerModule()
+        returned = module.to('cuda')
+
+        assert returned is module
+        assert module.marker is True
 
 
 class TestModuleReprStr:

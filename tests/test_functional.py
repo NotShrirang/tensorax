@@ -227,6 +227,12 @@ class TestLossFunctions:
         loss = F.cross_entropy_from_logits(logits, targets, reduce_mean=False)
         assert loss.shape == (2,)
 
+    def test_cross_entropy_from_logits_no_reduce_1d_logits(self):
+        logits = Tensor([2.0, 1.0, 0.1], dtype='float32')
+        targets = Tensor([0], dtype='float32')
+        loss = F.cross_entropy_from_logits(logits, targets, reduce_mean=False)
+        assert loss.shape == ()
+
 class TestUnimplementedFunctions:
     """Test functions that are not yet implemented."""
 

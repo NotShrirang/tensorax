@@ -276,6 +276,117 @@ class TestMultiHeadAttentionLayer:
         output = sdpa(Q, K, V, mask=mask)
         assert output.shape == (1, 1, seq_len, 8)
 
+    def test_sdpa_layer_repr(self):
+        from tensorax.nn.attention import ScaledDotProductAttention
+
+        sdpa = ScaledDotProductAttention()
+        assert repr(sdpa) == "ScaledDotProductAttention()"
+
+
+class TestAttentionUtilsAndVariants:
+
+    def test_attention_utils_create_causal_mask(self):
+        from tensorax.nn.attention import utils as attention_utils
+
+        mask = attention_utils.create_causal_mask(seq_len=4, batch_size=2, num_heads=3)
+        assert mask.shape == (2, 3, 4, 4)
+
+        mask_data = mask.tolist()
+        assert mask_data[0][0][0][0] == 0.0
+        assert mask_data[0][0][0][1] == float('-inf')
+        assert mask_data[1][2][3][0] == 0.0
+
+    def test_attention_utils_create_padding_mask(self):
+        from tensorax.nn.attention import utils as attention_utils
+
+        mask = attention_utils.create_padding_mask(lengths=[1, 3], max_len=4, num_heads=2)
+        assert mask.shape == (2, 2, 1, 4)
+
+        mask_data = mask.tolist()
+        # First sample length=1 -> only index 0 unmasked
+        assert mask_data[0][0][0][0] == 0.0
+        assert mask_data[0][0][0][1] == float('-inf')
+        # Second sample length=3 -> indices [0,1,2] unmasked
+        assert mask_data[1][1][0][2] == 0.0
+        assert mask_data[1][1][0][3] == float('-inf')
+
+    def test_sdpa_variants_output_shape(self):
+        batch, heads, seq_len, d = 1, 1, 3, 4
+        Q = Tensor.randn((batch, heads, seq_len, d))
+        K = Tensor.randn((batch, heads, seq_len, d))
+        V = Tensor.randn((batch, heads, seq_len, d))
+
+        out_tiled = F.scaled_dot_product_attention_tiled(Q, K, V)
+        out_flash = F.scaled_dot_product_attention_flash(Q, K, V)
+        out_flash_opt = F.scaled_dot_product_attention_flash_optimized(Q, K, V)
+
+        assert out_tiled.shape == (batch, heads, seq_len, d)
+        assert out_flash.shape == (batch, heads, seq_len, d)
+        assert out_flash_opt.shape == (batch, heads, seq_len, d)
+
+    def test_sdpa_validates_tensor_device_consistency(self):
+        Q = Tensor.randn((1, 1, 2, 2))
+        K = Tensor.randn((1, 1, 2, 2))
+        V = Tensor.randn((1, 1, 2, 2))
+
+        # Force mismatch without requiring CUDA hardware.
+        K.device = 'cuda'
+
+        with pytest.raises(ValueError, match="same device"):
+            F.scaled_dot_product_attention(Q, K, V)
+
+    def test_sdpa_validates_mask_device_consistency(self):
+        Q = Tensor.randn((1, 1, 2, 2))
+        K = Tensor.randn((1, 1, 2, 2))
+        V = Tensor.randn((1, 1, 2, 2))
+        mask = Tensor.zeros((1, 1, 2, 2))
+
+        # Force mismatch without requiring CUDA hardware.
+        mask.device = 'cuda'
+
+        with pytest.raises(ValueError, match="Mask must be on the same device"):
+            F.scaled_dot_product_attention(Q, K, V, mask=mask)
+
+    def test_sdpa_raises_when_backend_missing(self, monkeypatch):
+        Q = Tensor.randn((1, 1, 2, 2))
+        K = Tensor.randn((1, 1, 2, 2))
+        V = Tensor.randn((1, 1, 2, 2))
+
+        monkeypatch.setattr(F, "_C", None)
+
+        with pytest.raises(RuntimeError, match=r"C\+\+ backend not available"):
+            F.scaled_dot_product_attention(Q, K, V)
+
+        with pytest.raises(RuntimeError, match=r"C\+\+ backend not available"):
+            F._sdpa_variant(Q, K, V, None, lambda *_: None)
+
+    def test_sdpa_variant_rejects_non_4d_inputs(self):
+        Q = Tensor.randn((2, 2))
+        K = Tensor.randn((2, 2))
+        V = Tensor.randn((2, 2))
+
+        with pytest.raises(ValueError, match="must be 4D tensors"):
+            F._sdpa_variant(Q, K, V, None, lambda *_: None)
+
+    def test_sdpa_variant_rejects_device_mismatch(self):
+        Q = Tensor.randn((1, 1, 2, 2))
+        K = Tensor.randn((1, 1, 2, 2))
+        V = Tensor.randn((1, 1, 2, 2))
+        V.device = 'cuda'
+
+        with pytest.raises(ValueError, match="same device"):
+            F._sdpa_variant(Q, K, V, None, lambda *_: None)
+
+    def test_sdpa_variant_rejects_mask_device_mismatch(self):
+        Q = Tensor.randn((1, 1, 2, 2))
+        K = Tensor.randn((1, 1, 2, 2))
+        V = Tensor.randn((1, 1, 2, 2))
+        mask = Tensor.zeros((1, 1, 2, 2))
+        mask.device = 'cuda'
+
+        with pytest.raises(ValueError, match="Mask must be on the same device"):
+            F._sdpa_variant(Q, K, V, mask, lambda *_: None)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

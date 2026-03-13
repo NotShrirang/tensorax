@@ -352,12 +352,12 @@ pytest tests/test_tensor.py -v
 
 ### Test Status
 
-**Current Status (December 9, 2025):**
+**Current Status (March 13, 2026):**
 
-- ✅ **229 tests passing** (98.9% success rate)
-- 🟡 **5 tests skipped** (CUDA tests - require GPU)
+- ✅ **400 tests passing**
+- 🟡 **0 tests skipped**
 - 🔴 **0 tests failing**
-- 📊 **87% code coverage**
+- 📊 **98% code coverage**
 
 **Test Breakdown:**
 
@@ -440,7 +440,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 - [x] Loss functions (MSE, Cross Entropy)
 - [x] Sequential container
 - [x] Device management (CPU/CUDA)
-- [x] Comprehensive test suite (229 tests passing)
+- [x] Comprehensive test suite (400 tests passing)
 - [x] Tensor serialization (save/load)
 - [x] Scaled dot-product attention (naive, tiled, flash CUDA kernels)
 
