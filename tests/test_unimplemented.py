@@ -38,13 +38,6 @@ class TestUnimplementedLayers:
             y = layer(x)
             assert y.shape == (4, 32, 28, 28)
 
-    def test_layer_norm_layer(self):
-        # Layer normalization
-        with pytest.raises(AttributeError):
-            layer = nn.LayerNorm(normalized_shape=[32])
-            x = Tensor(np.random.randn(4, 10, 32), dtype='float32')
-            y = layer(x)
-            assert y.shape == (4, 10, 32)
 
     def test_rnn_layer(self):
         # Recurrent Neural Network

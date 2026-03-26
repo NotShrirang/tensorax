@@ -7,11 +7,19 @@ class TestAdvancedTensorOps:
     """Test advanced tensor operations that may not be implemented yet."""
 
     def test_tensor_reshape(self):
-        # This will likely fail until reshape is implemented
+        # Now implemented!
         x = Tensor([[1, 2, 3, 4]], dtype='float32')
-        with pytest.raises(AttributeError):
-            y = x.reshape((2, 2))
-            assert y.shape == (2, 2)
+        y = x.reshape((2, 2))
+        assert y.shape == (2, 2)
+        assert y.tolist() == [[1, 2], [3, 4]]
+        
+        # Test backward
+        x = Tensor([[1.0, 2.0, 3.0, 4.0]], requires_grad=True)
+        y = x.reshape((2, 2))
+        y.backward(Tensor([[1.0, 1.0], [1.0, 1.0]]))
+        assert x.grad is not None
+        assert x.grad.shape == (1, 4)
+        assert x.grad.tolist() == [[1.0, 1.0, 1.0, 1.0]]
 
     def test_tensor_view(self):
         # View operation

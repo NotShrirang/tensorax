@@ -11,6 +11,9 @@ from .layers import (
     Softmax,
     Dropout,
     Sequential,
+    RMSNorm,
+    LayerNorm,
+    BatchNorm,
 )
 
 __all__ = [
@@ -22,4 +25,7 @@ __all__ = [
     'Softmax',
     'Dropout',
     'Sequential',
+    'RMSNorm',
+    'LayerNorm',
+    'BatchNorm',
 ]

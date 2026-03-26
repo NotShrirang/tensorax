@@ -388,5 +388,21 @@ class TestAttentionUtilsAndVariants:
             F._sdpa_variant(Q, K, V, mask, lambda *_: None)
 
 
+class TestGroupedQueryAttention:
+    """Test GQA layer."""
+    def test_gqa_forward(self):
+        # 4 query heads, 2 kv heads
+        from tensorax.nn.attention.layers import GroupedQueryAttention
+        gqa = GroupedQueryAttention(num_heads=4, num_kv_heads=2)
+        
+        # batch=1, seq_len=2, heads, head_dim=4
+        q = Tensor.randn((1, 2, 4, 4))
+        k = Tensor.randn((1, 2, 2, 4))
+        v = Tensor.randn((1, 2, 2, 4))
+        
+        out = gqa(q, k, v)
+        assert out.shape == (1, 2, 4, 4)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

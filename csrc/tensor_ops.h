@@ -34,6 +34,8 @@ namespace tensorax
                                     const std::vector<int64_t> &shape,
                                     const std::string &dtype);
     TensorHandle copy_tensor(const TensorHandle &tensor);
+    TensorHandle reshape(const TensorHandle &tensor, const std::vector<int64_t> &shape);
+    TensorHandle repeat_interleave(const TensorHandle &x, int64_t repeats, int64_t dim);
 
     TensorHandle tensor_cpu_to_cuda(const TensorHandle &tensor);
     TensorHandle tensor_cuda_to_cpu(const TensorHandle &tensor);

@@ -542,3 +542,61 @@ class TestTrainEvalModes:
 
         seq.train()
         assert seq.training is True
+
+class TestNormLayers:
+    """Test Normalization Layers."""
+    
+    def test_layer_norm(self):
+        from tensorax import nn
+        import numpy as np
+        
+        norm = nn.LayerNorm(4)
+        x = Tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 15.0]])
+        y = norm(x)
+        assert y.shape == (2, 4)
+        
+        row0 = np.array([1.0, 2.0, 3.0, 4.0])
+        mean = row0.mean()
+        var = row0.var()
+        expected0 = (row0 - mean) / np.sqrt(var + 1e-5)
+        
+        assert np.allclose(y.tolist()[0], expected0, atol=1e-4)
+
+    def test_rms_norm(self):
+        from tensorax import nn
+        import numpy as np
+        
+        norm = nn.RMSNorm(4)
+        x = Tensor([[1.0, 2.0, 3.0, 4.0]])
+        y = norm(x)
+        assert y.shape == (1, 4)
+        
+        row = np.array([1.0, 2.0, 3.0, 4.0])
+        rms = np.sqrt(np.mean(row**2) + 1e-6)
+        expected = row / rms
+        
+        assert np.allclose(y.tolist()[0], expected, atol=1e-4)
+
+    def test_batch_norm(self):
+        from tensorax import nn
+        import numpy as np
+        
+        norm = nn.BatchNorm(3)
+        x = Tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        norm.train()
+        y = norm(x)
+        assert y.shape == (2, 3)
+        
+        col0 = np.array([1.0, 4.0])
+        mean0 = col0.mean()
+        var0 = ((col0 - mean0)**2).mean()
+        ex0_0 = (1.0 - mean0) / np.sqrt(var0 + 1e-5)
+        ex1_0 = (4.0 - mean0) / np.sqrt(var0 + 1e-5)
+        
+        assert np.isclose(y.tolist()[0][0], ex0_0, atol=1e-4)
+        assert np.isclose(y.tolist()[1][0], ex1_0, atol=1e-4)
+        
+        norm.eval()
+        x_eval = Tensor([[1.0, 2.0, 3.0]])
+        y_eval = norm(x_eval)
+        assert y_eval.shape == (1, 3)

@@ -136,3 +136,61 @@ class Sequential(Module):
         if str(index) not in self._modules:
             raise IndexError("Index out of range")
         return self._modules[str(index)]
+
+
+class RMSNorm(Module):
+    """Root Mean Square Normalization."""
+    
+    def __init__(self, normalized_shape: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self._parameters['weight'] = Tensor.ones((normalized_shape,), requires_grad=True)
+        
+    def forward(self, x: Tensor) -> Tensor:
+        # Calculate RMS: sqrt(mean(x^2))
+        variance = (x * x).mean(dim=-1, keepdim=True)
+        x_normed = x * (variance + self.eps).sqrt() ** -1.0
+        return x_normed * self._parameters['weight']
+
+class LayerNorm(Module):
+    """Layer Normalization."""
+    
+    def __init__(self, normalized_shape: int, eps: float = 1e-5):
+        super().__init__()
+        self.eps = eps
+        self._parameters['weight'] = Tensor.ones((normalized_shape,), requires_grad=True)
+        self._parameters['bias'] = Tensor.zeros((normalized_shape,), requires_grad=True)
+        
+    def forward(self, x: Tensor) -> Tensor:
+        mean = x.mean(dim=-1, keepdim=True)
+        variance = ((x - mean) * (x - mean)).mean(dim=-1, keepdim=True)
+        x_normed = (x - mean) * (variance + self.eps).sqrt() ** -1.0
+        return x_normed * self._parameters['weight'] + self._parameters['bias']
+
+class BatchNorm(Module):
+    """Batch Normalization (1D)."""
+    
+    def __init__(self, num_features: int, eps: float = 1e-5, momentum: float = 0.1):
+        super().__init__()
+        self.num_features = num_features
+        self.eps = eps
+        self.momentum = momentum
+        self._parameters['weight'] = Tensor.ones((num_features,), requires_grad=True)
+        self._parameters['bias'] = Tensor.zeros((num_features,), requires_grad=True)
+        # Using tensors for running stats without requires_grad
+        self.running_mean = Tensor.zeros((num_features,), requires_grad=False)
+        self.running_var = Tensor.ones((num_features,), requires_grad=False)
+        
+    def forward(self, x: Tensor) -> Tensor:
+        if self.training:
+            mean = x.mean(dim=0, keepdim=True)
+            variance = ((x - mean) * (x - mean)).mean(dim=0, keepdim=True)
+
+            self.running_mean = self.running_mean * (1 - self.momentum) + mean.sum(dim=0) * self.momentum
+            self.running_var = self.running_var * (1 - self.momentum) + variance.sum(dim=0) * self.momentum
+        else:
+            mean = self.running_mean
+            variance = self.running_var
+            
+        x_normed = (x - mean) * (variance + self.eps).sqrt() ** -1.0
+        return x_normed * self._parameters['weight'] + self._parameters['bias']

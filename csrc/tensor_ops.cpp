@@ -92,6 +92,55 @@ namespace tensorax
         return std::make_shared<TensorImpl>(data_vec, tensor->shape, tensor->dtype, tensor->device);
     }
 
+    TensorHandle reshape(const TensorHandle &tensor, const std::vector<int64_t> &shape)
+    {
+        auto data_vec = tensor->to_vector();
+        return std::make_shared<TensorImpl>(data_vec, shape, tensor->dtype, tensor->device);
+    }
+
+    TensorHandle repeat_interleave(const TensorHandle &x, int64_t repeats, int64_t dim)
+    {
+        std::vector<int64_t> out_shape = x->shape;
+        int64_t ndim = out_shape.size();
+        
+        if (dim < 0) dim += ndim;
+        if (dim < 0 || dim >= ndim) {
+            throw std::runtime_error("Dimension out of range");
+        }
+        
+        out_shape[dim] *= repeats;
+        
+        int64_t inner_size = 1;
+        for (int64_t i = dim + 1; i < ndim; ++i) {
+            inner_size *= x->shape[i];
+        }
+        
+        int64_t dim_size = x->shape[dim];
+        int64_t outer_size = x->size / (dim_size * inner_size);
+        
+        auto in_data = x->to_vector();
+        std::vector<float> out_data;
+        out_data.resize(x->size * repeats);
+        
+        for (int64_t i = 0; i < outer_size; ++i) {
+            for (int64_t j = 0; j < dim_size; ++j) {
+                for (int64_t r = 0; r < repeats; ++r) {
+                    for (int64_t k = 0; k < inner_size; ++k) {
+                        int64_t in_idx = i * (dim_size * inner_size) + j * inner_size + k;
+                        int64_t out_idx = i * (dim_size * repeats * inner_size) + (j * repeats + r) * inner_size + k;
+                        out_data[out_idx] = in_data[in_idx];
+                    }
+                }
+            }
+        }
+        
+        auto res = create_tensor_cpu(out_data, out_shape, x->dtype);
+        if (x->device == "cuda") {
+            return tensor_cpu_to_cuda(res);
+        }
+        return res;
+    }
+
     // Device transfer
     TensorHandle tensor_cpu_to_cuda(const TensorHandle &tensor)
     {
@@ -1150,6 +1199,8 @@ PYBIND11_MODULE(_C, m)
     m.def("create_tensor_cpu", &tensorax::create_tensor_cpu);
     m.def("create_tensor_cuda", &tensorax::create_tensor_cuda);
     m.def("copy_tensor", &tensorax::copy_tensor);
+    m.def("reshape", &tensorax::reshape);
+    m.def("repeat_interleave", &tensorax::repeat_interleave);
 
     // Device transfer
     m.def("tensor_cpu_to_cuda", &tensorax::tensor_cpu_to_cuda);

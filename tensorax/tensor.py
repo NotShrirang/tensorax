@@ -125,6 +125,26 @@ class Tensor:
     def _compute_size(shape):
         """Compute total number of elements."""
         return _compute_size(shape)
+
+    def _broadcast_to(self, target_shape: Tuple[int, ...]) -> 'Tensor':
+        """Broadcasts this tensor to the given target shape if compatible by repeating elements."""
+        if self._shape == target_shape:
+            return self
+            
+        dim_diff = len(target_shape) - len(self._shape)
+        if dim_diff < 0:
+            raise RuntimeError(f"Cannot broadcast {self._shape} to {target_shape}")
+            
+        padded_shape = tuple([1] * dim_diff) + tuple(self._shape)
+        result = self.reshape(padded_shape) if dim_diff > 0 else self
+        
+        for i, (s_size, t_size) in enumerate(zip(result.shape, target_shape)):
+            if s_size != t_size:
+                if s_size != 1:
+                    raise RuntimeError(f"Cannot broadcast {self._shape} to {target_shape}")
+                result = result.repeat_interleave(t_size, dim=i)
+        
+        return result
     
     @property
     def shape(self) -> Tuple[int, ...]:
@@ -279,10 +299,30 @@ class Tensor:
         """Element-wise multiplication."""
         if isinstance(other, (int, float)):
             other = Tensor.full(self._shape, other, dtype=self.dtype, device=self.device)
-        
+            
         if self.device != other.device:
             raise RuntimeError(f"Tensors on different devices: {self.device} vs {other.device}")
-        
+            
+        if self._shape != other._shape:
+            # Broadcast shapes
+            # Similar to numpy, right-align shapes
+            shape_a = list(self._shape)
+            shape_b = list(other._shape)
+            dim_a = len(shape_a)
+            dim_b = len(shape_b)
+            
+            target_shape = []
+            for i in range(1, max(dim_a, dim_b) + 1):
+                a_dim = shape_a[-i] if i <= dim_a else 1
+                b_dim = shape_b[-i] if i <= dim_b else 1
+                if a_dim != b_dim and a_dim != 1 and b_dim != 1:
+                    raise RuntimeError(f"Shapes {self._shape} and {other._shape} are not broadcastable")
+                target_shape.insert(0, max(a_dim, b_dim))
+                
+            self_b = self._broadcast_to(target_shape)
+            other_b = other._broadcast_to(target_shape)
+            return self_b * other_b
+            
         result = Tensor.__new__(Tensor)
         result._shape = self._shape
         result._size = self._size
@@ -299,7 +339,7 @@ class Tensor:
         else:
             result.requires_grad = False
             result._grad_fn = None
-        
+            
         return result
     
     def __sub__(self, other: Union['Tensor', float]) -> 'Tensor':
@@ -309,6 +349,20 @@ class Tensor:
         
         if self.device != other.device:
             raise RuntimeError(f"Tensors on different devices: {self.device} vs {other.device}")
+            
+        if self._shape != other._shape:
+            target_shape = []
+            len_a = len(self._shape)
+            len_b = len(other._shape)
+            for i in range(max(len_a, len_b)):
+                dim_a = self._shape[-(i+1)] if i < len_a else 1
+                dim_b = other._shape[-(i+1)] if i < len_b else 1
+                target_shape.insert(0, max(dim_a, dim_b))
+            target_shape = tuple(target_shape)
+            
+            self_b = self._broadcast_to(target_shape)
+            other_b = other._broadcast_to(target_shape)
+            return self_b.__sub__(other_b)
         
         result = Tensor.__new__(Tensor)
         result._shape = self._shape
@@ -333,10 +387,28 @@ class Tensor:
         """Element-wise division."""
         if isinstance(other, (int, float)):
             other = Tensor.full(self._shape, other, dtype=self.dtype, device=self.device)
-        
+            
         if self.device != other.device:
             raise RuntimeError(f"Tensors on different devices: {self.device} vs {other.device}")
-        
+            
+        if self._shape != other._shape:
+            shape_a = list(self._shape)
+            shape_b = list(other._shape)
+            dim_a = len(shape_a)
+            dim_b = len(shape_b)
+            
+            target_shape = []
+            for i in range(1, max(dim_a, dim_b) + 1):
+                a_dim = shape_a[-i] if i <= dim_a else 1
+                b_dim = shape_b[-i] if i <= dim_b else 1
+                if a_dim != b_dim and a_dim != 1 and b_dim != 1:
+                    raise RuntimeError(f"Shapes {self._shape} and {other._shape} are not broadcastable")
+                target_shape.insert(0, max(a_dim, b_dim))
+                
+            self_b = self._broadcast_to(target_shape)
+            other_b = other._broadcast_to(target_shape)
+            return self_b / other_b
+            
         result = Tensor.__new__(Tensor)
         result._shape = self._shape
         result._size = self._size
@@ -353,7 +425,7 @@ class Tensor:
         else:
             result.requires_grad = False
             result._grad_fn = None
-        
+            
         return result
     
     def matmul(self, other: 'Tensor', method: str = "default") -> 'Tensor':
@@ -646,7 +718,32 @@ class Tensor:
                 # d(transpose)/dx = transpose(grad)
                 x = inputs[0]
                 if x.requires_grad:
-                    x.backward(grad.T)
+                    # Fix transpose gradient for specific dims if dims were provided
+                    if len(inputs) > 1:
+                        # transpose with dim0 and dim1
+                        dim0, dim1 = inputs[1], inputs[2]
+                        x.backward(grad.transpose(dim0, dim1))
+                    else:
+                        # regular T
+                        x.backward(grad.T)
+            elif op == 'reshape':
+                x = inputs[0]
+                if x.requires_grad:
+                    x.backward(grad.reshape(x.shape))
+            elif op == 'repeat_interleave':
+                x, repeats, dim = inputs[0], inputs[1], inputs[2]
+                if x.requires_grad:
+                    # gradient of repeat_interleave involves summing the repeated sections back
+                    # This is slightly complex to implement efficiently via matrix math without a dedicated op
+                    # But essentially it's equivalent to reshaping backward and summing
+                    grad_shape = list(grad.shape)
+                    inner_shape = grad_shape[dim] // repeats
+                    grad_shape[dim] = repeats
+                    grad_shape.insert(dim + 1, inner_shape)
+                    
+                    reshaped_grad = grad.reshape(tuple(grad_shape))
+                    summed_grad = reshaped_grad.sum(dim=dim)
+                    x.backward(summed_grad)
             elif op == 'sqrt':
                 # d(sqrt(x))/dx = 1/(2*sqrt(x))
                 x, output = inputs[0], inputs[1] if len(inputs) > 1 else None
@@ -760,6 +857,59 @@ class Tensor:
         
         return result
     
+    def reshape(self, shape: Tuple[int, ...]) -> 'Tensor':
+        """Reshape the tensor."""
+        size = Tensor._compute_size(shape)
+        if size != self._size:
+            raise RuntimeError(f"shape '{shape}' is invalid for input of size {self._size}")
+        
+        result = Tensor.__new__(Tensor)
+        result._shape = shape
+        result._size = size
+        result.dtype = self.dtype
+        result.device = self.device
+        result.grad = None
+        
+        if _C:
+            result._c_tensor = _C.reshape(self._c_tensor, list(shape))
+        
+        if self.requires_grad:
+            result.requires_grad = True
+            result._grad_fn = ('reshape', self)
+        else:
+            result.requires_grad = False
+            result._grad_fn = None
+            
+        return result
+
+    def repeat_interleave(self, repeats: int, dim: int = 0) -> 'Tensor':
+        """Repeat elements of a tensor."""
+        if dim < 0:
+            dim += len(self._shape)
+        if dim < 0 or dim >= len(self._shape):
+            raise ValueError(f"Dimension out of range (expected to be in range of [0, {len(self._shape)-1}], but got {dim})")
+            
+        result = Tensor.__new__(Tensor)
+        result_shape = list(self._shape)
+        result_shape[dim] *= repeats
+        result._shape = tuple(result_shape)
+        result._size = Tensor._compute_size(result._shape)
+        result.dtype = self.dtype
+        result.device = self.device
+        result.grad = None
+        
+        if _C:
+            result._c_tensor = _C.repeat_interleave(self._c_tensor, repeats, dim)
+            
+        if self.requires_grad:
+            result.requires_grad = True
+            result._grad_fn = ('repeat_interleave', self, repeats, dim)
+        else:
+            result.requires_grad = False
+            result._grad_fn = None
+            
+        return result
+
     def transpose(self, dim0: int, dim1: int) -> 'Tensor':
         """Transpose two specified dimensions."""
         if dim0 < 0 or dim0 >= len(self._shape) or dim1 < 0 or dim1 >= len(self._shape):
@@ -809,22 +959,31 @@ class Tensor:
         
         return result
 
-    def sum(self, dim: Optional[int] = None) -> 'Tensor':
+    def sum(self, dim: Optional[int] = None, keepdim: bool = False) -> 'Tensor':
         """Sum along specified dimension."""
-        if dim is not None and (dim < 0 or dim >= len(self._shape)):
-            raise ValueError(f"Dimension out of range (expected to be in range of [0, {len(self._shape)-1}], but got {dim})")
+        if dim is not None:
+            if dim < 0:
+                dim += len(self._shape)
+            if dim < 0 or dim >= len(self._shape):
+                raise ValueError(f"Dimension out of range (expected to be in range of [0, {len(self._shape)-1}], but got {dim})")
         
         result = Tensor.__new__(Tensor)
         c_dim = -1 if dim is None else dim
         
         if dim is None:
             # Sum all elements
-            result._shape = ()
+            if keepdim:
+                result._shape = tuple([1] * len(self._shape))
+            else:
+                result._shape = ()
             result._size = 1
         else:
             # Sum along specified dimension
             result_shape = list(self._shape)
-            del result_shape[dim]
+            if keepdim:
+                result_shape[dim] = 1
+            else:
+                del result_shape[dim]
             result._shape = tuple(result_shape)
             result._size = Tensor._compute_size(result._shape)
         
@@ -833,7 +992,10 @@ class Tensor:
         result.grad = None
         
         if _C:
-            result._c_tensor = _C.sum(self._c_tensor, c_dim)
+            c_result = _C.sum(self._c_tensor, c_dim)
+            if keepdim:
+                c_result = _C.reshape(c_result, list(result._shape))
+            result._c_tensor = c_result
         
         # Track gradient through sum
         if self.requires_grad:
@@ -845,22 +1007,31 @@ class Tensor:
         
         return result
 
-    def mean(self, dim: Optional[int] = None) -> 'Tensor':
+    def mean(self, dim: Optional[int] = None, keepdim: bool = False) -> 'Tensor':
         """Mean along specified dimension."""
-        if dim is not None and (dim < 0 or dim >= len(self._shape)):
-            raise ValueError(f"Dimension out of range (expected to be in range of [0, {len(self._shape)-1}], but got {dim})")
+        if dim is not None:
+            if dim < 0:
+                dim += len(self._shape)
+            if dim < 0 or dim >= len(self._shape):
+                raise ValueError(f"Dimension out of range (expected to be in range of [0, {len(self._shape)-1}], but got {dim})")
         
         result = Tensor.__new__(Tensor)
         c_dim = -1 if dim is None else dim
         
         if dim is None:
             # Mean of all elements
-            result._shape = ()
+            if keepdim:
+                result._shape = tuple([1] * len(self._shape))
+            else:
+                result._shape = ()
             result._size = 1
         else:
             # Mean along specified dimension
             result_shape = list(self._shape)
-            del result_shape[dim]
+            if keepdim:
+                result_shape[dim] = 1
+            else:
+                del result_shape[dim]
             result._shape = tuple(result_shape)
             result._size = Tensor._compute_size(result._shape)
         
@@ -869,7 +1040,10 @@ class Tensor:
         result.grad = None
         
         if _C:
-            result._c_tensor = _C.mean(self._c_tensor, c_dim)
+            c_result = _C.mean(self._c_tensor, c_dim)
+            if keepdim:
+                c_result = _C.reshape(c_result, list(result._shape))
+            result._c_tensor = c_result
         
         # Track gradient through mean
         if self.requires_grad:

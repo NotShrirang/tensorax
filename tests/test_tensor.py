@@ -475,7 +475,7 @@ class TestSumMeanOperations:
     def test_sum_negative_dim_invalid(self):
         a = Tensor([[1, 2], [3, 4]], dtype='float32')
         with pytest.raises(ValueError):
-            a.sum(dim=-1)
+            a.sum(dim=-3)
 
     def test_mean_all_elements(self):
         a = Tensor([[1, 2], [3, 4]], dtype='float32')
