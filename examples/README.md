@@ -20,8 +20,8 @@ Run: `python examples/basic_operations.py`
 Shows how to build and train a simple feedforward neural network:
 
 - Defining custom modules
-- Using built-in layers (Linear, ReLU)
-- Training loop with optimizer
+- Using built-in layers (Linear, ReLU, GELU, SiLU)
+- Training loop with optimizer and LR scheduler
 - Evaluation mode
 
 Run: `python examples/simple_nn.py`
@@ -35,6 +35,18 @@ Demonstrates GPU acceleration with CUDA:
 - Checking CUDA availability
 
 Run: `python examples/cuda_example.py` (requires GPU)
+
+## Available Components
+
+| Category | Components |
+|---|---|
+| **Layers** | `Linear`, `Embedding`, `Sequential` |
+| **Activations** | `ReLU`, `Sigmoid`, `Tanh`, `Softmax`, `GELU`, `SiLU` |
+| **Normalization** | `LayerNorm`, `RMSNorm`, `BatchNorm` |
+| **Attention** | `ScaledDotProductAttention`, `GroupedQueryAttention`, `MultiHeadAttention` |
+| **Optimizers** | `SGD`, `Adam` |
+| **LR Schedulers** | `StepLR`, `ExponentialLR`, `CosineAnnealingLR`, `LinearLR`, `MultiStepLR` |
+| **Losses** | `mse_loss`, `cross_entropy_loss`, `cross_entropy_from_logits` |
 
 ## Requirements
 

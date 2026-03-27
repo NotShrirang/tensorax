@@ -1,7 +1,8 @@
 # Tensorax User & Developer Guide
 
-**Status:** Production Ready (December 9, 2025)
-**Test Coverage:** 229/234 tests passing (98.9%), 87% code coverage
+**Status:** Production Ready
+**Version:** 0.2.0
+**Test Coverage:** 433 tests passing (100%), 95% code coverage
 
 This comprehensive guide covers everything from basic usage to advanced development.
 
@@ -10,13 +11,16 @@ This comprehensive guide covers everything from basic usage to advanced developm
 Tensorax has achieved production-ready status with:
 
 - ✅ Complete tensor operations (element-wise, reduction, mathematical)
-- ✅ Full autograd system with gradient tracking
-- ✅ Neural network layers (Linear, activations, Dropout, Sequential)
+- ✅ Full autograd system with gradient tracking through 18+ ops
+- ✅ Neural network layers (Linear, Embedding, activations, norms, Dropout, Sequential)
+- ✅ Activation functions (ReLU, Sigmoid, Tanh, Softmax, GELU, SiLU)
+- ✅ Attention (Scaled Dot-Product, Flash, GQA, Multi-Head Attention)
 - ✅ Working optimizers (SGD with momentum, Adam)
-- ✅ Loss functions (MSE, Cross Entropy)
-- ✅ Comprehensive test suite (229 passing tests)
+- ✅ Loss functions (MSE, Cross Entropy, Cross Entropy from logits)
+- ✅ Learning rate schedulers (StepLR, ExponentialLR, CosineAnnealingLR, LinearLR, MultiStepLR)
+- ✅ Comprehensive test suite (433 passing tests)
 - ✅ Device management (CPU/CUDA with automatic fallback)
-- ✅ 87% code coverage
+- ✅ 95% code coverage
 
 ## Quick Start Guide
 
@@ -82,168 +86,44 @@ CUDA_HOME=/usr/local/cuda python setup.py build_ext --inplace
 python -c "from tensorax import Tensor; print(f'CUDA available: {Tensor.cuda_is_available()}')"
 ```
 
-## Phase 2: Core Operations (Weeks 3-4)
+## What's Implemented
 
-### Priority Operations to Implement
+All core phases are complete. Here is a summary of what has been built:
 
-1. **More Elementwise Operations**
+### Core Operations (Complete ✅)
+- Element-wise: add, sub, mul, div, pow
+- Math: exp, log, sqrt
+- Reductions: sum, mean, max (with dim, keepdim)
+- Shape: reshape, transpose, repeat_interleave
+- Broadcasting, scalar ops, operator overloading
 
-   - Subtraction, division, power
-   - Comparison operators (>, <, ==)
-   - Logical operations (and, or, not)
+### Autograd (Complete ✅)
+- Reverse-mode autodiff with computational graph
+- Gradients through 18+ ops including embedding
+- `loss.backward()` → `param.grad` → `optimizer.step()`
 
-   Files to modify:
+### Neural Network Layers (Complete ✅)
+- `Linear`, `Embedding`, `Sequential`
+- Activations: `ReLU`, `Sigmoid`, `Tanh`, `Softmax`, `GELU`, `SiLU`
+- Normalization: `LayerNorm`, `RMSNorm`, `BatchNorm`
+- `Dropout` with train/eval mode
+- Attention: `ScaledDotProductAttention`, `GroupedQueryAttention`, `MultiHeadAttention`
 
-   - `csrc/cuda/kernels/elementwise.cu` - Add CUDA kernels
-   - `csrc/tensor_ops.h` - Declare functions
-   - `csrc/tensor_ops.cpp` - Add Python bindings
-   - `tensorax/tensor.py` - Implement operators
+### Optimizers & Schedulers (Complete ✅)
+- `SGD` (with momentum), `Adam` (with bias correction)
+- `StepLR`, `ExponentialLR`, `CosineAnnealingLR`, `LinearLR`, `MultiStepLR`
 
-2. **Reshape and View Operations**
+### CUDA Kernels (Complete ✅)
+- 6 matmul variants (naive → 2D block tiling)
+- 4 attention kernels (naive → flash optimized)
+- 14+ element-wise kernels
+- Reduction kernels (sum, mean, max)
 
-   - Reshape, view, squeeze, unsqueeze
-   - Concatenate, stack, split
-   - Indexing and slicing
+---
 
-3. **Reduction Operations**
+## Next Phases
 
-   - Sum, mean, max, min
-   - Argmax, argmin
-   - Norm operations
-
-   Example implementation:
-
-   ```cuda
-   // csrc/cuda/kernels/reduction.cu
-   __global__ void sum_kernel(const float* input, float* output,
-                               int64_t size, int64_t reduce_dim) {
-       // Implementation
-   }
-   ```
-
-## Phase 3: Autograd System (Weeks 5-6)
-
-### Current State
-
-- Basic gradient tracking structure exists
-- Simple backward propagation for add/mul
-
-### Complete Autograd Implementation
-
-1. **Computation Graph**
-
-   ```python
-   # In tensorax/autograd.py (create this file)
-   class Function:
-       @staticmethod
-       def forward(ctx, *args):
-           raise NotImplementedError
-
-       @staticmethod
-       def backward(ctx, grad_output):
-           raise NotImplementedError
-   ```
-
-2. **Operation Functions**
-   Create `tensorax/autograd/functions.py`:
-
-   - AddBackward
-   - MulBackward
-   - MatmulBackward
-   - ReluBackward
-   - etc.
-
-3. **Gradient Computation**
-   Improve `tensor.py`:
-
-   ```python
-   def backward(self, gradient=None):
-       if gradient is None:
-           gradient = Tensor(np.ones_like(self._data))
-
-       # Topological sort
-       topo = []
-       visited = set()
-
-       def build_topo(tensor):
-           if tensor not in visited and tensor.requires_grad:
-               visited.add(tensor)
-               if tensor._grad_fn:
-                   for parent in tensor._grad_fn[1:]:
-                       build_topo(parent)
-               topo.append(tensor)
-
-       build_topo(self)
-
-       # Backward pass
-       self.grad = gradient
-       for tensor in reversed(topo):
-           if tensor._grad_fn:
-               grads = compute_gradients(tensor._grad_fn, tensor.grad)
-               for parent, grad in zip(tensor._grad_fn[1:], grads):
-                   parent.grad = (parent.grad + grad) if parent.grad else grad
-   ```
-
-## Phase 4: Neural Network Layers (Weeks 7-8)
-
-### Convolution Layers
-
-1. **Conv2D Implementation**
-
-   ```cuda
-   // csrc/cuda/kernels/conv2d.cu
-   __global__ void conv2d_forward_kernel(
-       const float* input,
-       const float* weight,
-       float* output,
-       int batch, int in_channels, int out_channels,
-       int height, int width, int kernel_size,
-       int stride, int padding
-   ) {
-       // Implement im2col + GEMM approach
-   }
-   ```
-
-2. **Pooling Layers**
-   - MaxPool2D
-   - AvgPool2D
-   - AdaptiveAvgPool2D
-
-### Normalization Layers
-
-1. **BatchNorm**
-
-   ```python
-   class BatchNorm2d(Module):
-       def __init__(self, num_features):
-           self.running_mean = Tensor(np.zeros(num_features))
-           self.running_var = Tensor(np.ones(num_features))
-           # ...
-   ```
-
-2. **LayerNorm**
-3. **GroupNorm**
-
-## Phase 5: Advanced Optimizers (Week 9)
-
-### Implement Additional Optimizers
-
-1. **AdamW**
-
-   ```python
-   class AdamW(Optimizer):
-       def step(self):
-           # Adam with decoupled weight decay
-   ```
-
-2. **RMSprop**
-3. **Adagrad**
-4. **Learning Rate Schedulers**
-   - StepLR
-   - ExponentialLR
-   - CosineAnnealingLR
-
-## Phase 6: Performance Optimization (Weeks 10-11)
+### Phase Next: Performance Optimization
 
 ### CUDA Optimizations
 
@@ -292,7 +172,7 @@ python -c "from tensorax import Tensor; print(f'CUDA available: {Tensor.cuda_is_
 2. **Numba JIT Compilation**
 3. **Reduce Python/C++ boundary crossings**
 
-## Phase 7: Advanced Features (Weeks 12+)
+## Future: Advanced Features
 
 ### 1. Mixed Precision Training
 
@@ -339,7 +219,7 @@ def custom_operation(x, y):
     return x * y + x
 ```
 
-## Phase 8: Testing & Validation
+## Testing & Validation
 
 ### Comprehensive Test Suite
 
@@ -390,7 +270,7 @@ def custom_operation(x, y):
        np.testing.assert_allclose(y_tr.numpy(), y_pt.numpy())
    ```
 
-## Phase 9: Documentation & Examples
+## Documentation & Examples
 
 ### 1. API Documentation
 
@@ -413,7 +293,7 @@ def custom_operation(x, y):
 - GPT-style language model
 - GAN implementation
 
-## Phase 10: Release & Distribution
+## Release & Distribution
 
 ### 1. Packaging
 
@@ -453,9 +333,9 @@ jobs:
 
 Follow semantic versioning:
 
-- v0.1.0: Initial release
-- v0.2.0: Add convolution layers
-- v1.0.0: Stable API
+- v0.1.x: Initial release — core ops, autograd, NN layers, attention, CUDA kernels
+- v0.2.0: Embedding, GELU/SiLU, MultiHeadAttention, LR schedulers
+- v1.0.0: Stable API (future)
 
 ## Tips for Success
 

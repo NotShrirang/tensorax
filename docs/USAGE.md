@@ -13,7 +13,9 @@ Complete reference for using Tensorax — from basic tensor operations to traini
 - [Loss Functions](#loss-functions)
 - [Optimizers](#optimizers)
 - [Training a Model](#training-a-model)
+- [Embedding](#embedding)
 - [Attention](#attention)
+- [Learning Rate Schedulers](#learning-rate-schedulers)
 - [CUDA / GPU Acceleration](#cuda--gpu-acceleration)
 - [Matmul Kernel Selection](#matmul-kernel-selection)
 - [Functional API Reference](#functional-api-reference)
@@ -195,7 +197,7 @@ b.grad   # → 1.0 (dy/db = 1)
 
 ### Supported Autograd Operations
 
-Gradients flow through: `add`, `sub`, `mul`, `div`, `matmul`, `pow`, `sqrt`, `exp`, `sum`, `mean`, `relu`, `sigmoid`, `tanh`, `softmax`, `transpose`, `reshape`, `repeat_interleave`, `mse_loss`.
+Gradients flow through: `add`, `sub`, `mul`, `div`, `matmul`, `pow`, `sqrt`, `exp`, `sum`, `mean`, `relu`, `sigmoid`, `tanh`, `softmax`, `transpose`, `reshape`, `repeat_interleave`, `mse_loss`, `embedding`.
 
 ### Zeroing Gradients
 
@@ -235,8 +237,12 @@ relu = nn.ReLU()
 sigmoid = nn.Sigmoid()
 tanh = nn.Tanh()
 softmax = nn.Softmax(dim=-1)
+gelu = nn.GELU()
+silu = nn.SiLU()
 
 y = relu(x)
+y = gelu(x)    # Gaussian Error Linear Unit (used in GPT, BERT)
+y = silu(x)    # SiLU/Swish (used in LLaMA, EfficientNet)
 ```
 
 ### Dropout
@@ -402,6 +408,96 @@ predictions = model(x_test)
 
 ---
 
+## Learning Rate Schedulers
+
+```python
+from tensorax import lr_scheduler
+```
+
+### StepLR
+
+Decays the learning rate by `gamma` every `step_size` epochs.
+
+```python
+scheduler = lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
+# epoch 0-29: lr=0.001, epoch 30-59: lr=0.0001, ...
+```
+
+### ExponentialLR
+
+Decays the learning rate by `gamma` every epoch.
+
+```python
+scheduler = lr_scheduler.ExponentialLR(optimizer, gamma=0.95)
+# lr = base_lr * 0.95^epoch
+```
+
+### CosineAnnealingLR
+
+Cosine annealing from base LR to `eta_min` over `T_max` epochs.
+
+```python
+scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-6)
+```
+
+### LinearLR
+
+Linear warmup/decay between two factors.
+
+```python
+# Warmup: start at 1/3 of base LR, linearly reach full LR over 10 epochs
+scheduler = lr_scheduler.LinearLR(optimizer, start_factor=1.0/3, end_factor=1.0, total_iters=10)
+```
+
+### MultiStepLR
+
+Decays at specific milestone epochs.
+
+```python
+scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[50, 80], gamma=0.1)
+# epoch 0-49: lr=0.001, epoch 50-79: lr=0.0001, epoch 80+: lr=0.00001
+```
+
+### Usage Pattern
+
+```python
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
+
+for epoch in range(100):
+    output = model(x_train)
+    loss = F.mse_loss(output, y_train)
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    scheduler.step()          # update learning rate
+
+    print(scheduler.get_last_lr())  # current LR
+```
+
+---
+
+## Embedding
+
+```python
+emb = nn.Embedding(num_embeddings=1000, embedding_dim=64)
+
+# Lookup with 1D indices
+indices = Tensor([4, 12, 7], shape=(3,))
+vectors = emb(indices)  # shape: (3, 64)
+
+# Lookup with 2D indices (batch of sequences)
+indices = Tensor([0, 1, 2, 3, 4, 5], shape=(2, 3))
+vectors = emb(indices)  # shape: (2, 3, 64)
+
+# Supports backprop — gradients scatter back to the weight matrix
+vectors.sum().backward()
+emb.weight.grad  # shape: (1000, 64)
+```
+
+---
+
 ## Attention
 
 ### Scaled Dot-Product Attention
@@ -448,6 +544,24 @@ gqa = GroupedQueryAttention(num_heads=8, num_kv_heads=2)
 
 out = gqa(query, key, value, mask=mask)
 ```
+
+### Multi-Head Attention
+
+```python
+from tensorax import nn
+
+mha = nn.MultiHeadAttention(embed_dim=64, num_heads=8, bias=True)
+
+# Input: (batch, seq_len, embed_dim)
+q = Tensor.randn((2, 10, 64))
+k = Tensor.randn((2, 10, 64))
+v = Tensor.randn((2, 10, 64))
+
+output = mha(q, k, v)          # shape: (2, 10, 64)
+output = mha(q, k, v, mask=mask)  # with optional attention mask
+```
+
+Includes Q/K/V/output linear projections, head splitting/concatenation, and builds on `F.scaled_dot_product_attention`.
 
 ### CUDA Attention Kernels
 
@@ -562,6 +676,8 @@ from tensorax import functional as F
 | `F.sigmoid(x)` | 1 / (1 + exp(-x)) |
 | `F.tanh(x)` | hyperbolic tangent |
 | `F.softmax(x, dim=-1)` | normalized probabilities along `dim` |
+| `F.gelu(x)` | Gaussian Error Linear Unit |
+| `F.silu(x)` | SiLU/Swish: x * sigmoid(x) |
 
 ### Linear
 

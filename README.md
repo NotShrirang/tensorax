@@ -47,10 +47,10 @@ Reverse-mode autodiff with gradient tracking through 18+ operations.
 <td width="50%">
 
 ### 🎯 &nbsp; PyTorch-like API
-Familiar `Tensor`, `nn.Module`, `optim.Adam` interface — minimal learning curve.
+Familiar `Tensor`, `nn.Module`, `optim.Adam`, `lr_scheduler` interface — minimal learning curve.
 
 ### 🧱 &nbsp; Batteries included
-Linear, ReLU, LayerNorm, BatchNorm, Dropout, GQA, Flash Attention — ready to train.
+Linear, Embedding, GELU, SiLU, LayerNorm, BatchNorm, Dropout, MultiHeadAttention, GQA, Flash Attention, LR schedulers — ready to train.
 
 ### 📚 &nbsp; Built to learn from
 Clean, readable implementation of a DL framework from first principles.
@@ -72,11 +72,12 @@ pip install tensorax
 ```
 
 ```python
-from tensorax import Tensor, nn, optim, functional as F
+from tensorax import Tensor, nn, optim, lr_scheduler, functional as F
 
 # Build
-model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.LayerNorm(8), nn.Linear(8, 3))
+model = nn.Sequential(nn.Linear(4, 8), nn.GELU(), nn.LayerNorm(8), nn.Linear(8, 3))
 optimizer = optim.Adam(model.parameters(), lr=0.001)
+scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
 
 # Train
 for epoch in range(100):
@@ -84,6 +85,7 @@ for epoch in range(100):
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
+    scheduler.step()
 ```
 
 > **→** Full usage guide with all APIs, code examples, and details: **[docs/USAGE.md](docs/USAGE.md)**
@@ -114,8 +116,8 @@ for epoch in range(100):
 <td width="33%" valign="top">
 
 **Neural Networks**
-- `Linear`, `Sequential`
-- `ReLU`, `Sigmoid`, `Tanh`, `Softmax`
+- `Linear`, `Embedding`, `Sequential`
+- `ReLU`, `Sigmoid`, `Tanh`, `Softmax`, `GELU`, `SiLU`
 - `LayerNorm`, `RMSNorm`, `BatchNorm`
 - `Dropout`
 - `Module` base class
@@ -127,6 +129,7 @@ for epoch in range(100):
 - `SGD` with momentum
 - `Adam` with bias correction
 - `MSE`, `CrossEntropy`, `CE from logits`
+- 5 LR schedulers (Step, Cosine, Exponential, Linear, MultiStep)
 - Autograd through 18+ ops
 
 </td>
@@ -136,6 +139,7 @@ for epoch in range(100):
 
 **Attention**
 - Scaled dot-product attention
+- Multi-Head Attention with projections
 - 4 CUDA kernels (naive → flash)
 - Grouped Query Attention
 - Causal & padding masks
@@ -153,7 +157,7 @@ for epoch in range(100):
 <td width="33%" valign="top">
 
 **Infra**
-- 400 tests, 98% coverage
+- 433 tests, 95% coverage
 - CI/CD with GitHub Actions
 - `pybind11` bindings
 - Automatic CUDA fallback
@@ -198,10 +202,11 @@ csrc/                           C++ / CUDA backend
   tensor_ops.{cpp,h}             pybind11 bindings
 
 tensorax/                       Python package
-  tensor.py                       Tensor class + autograd (1100 lines)
-  functional.py                   F.relu, F.softmax, F.sdpa, ...
-  nn/                             Linear, norms, dropout, attention, GQA
+  tensor.py                       Tensor class + autograd
+  functional.py                   F.relu, F.gelu, F.silu, F.softmax, F.sdpa, ...
+  nn/                             Linear, Embedding, norms, dropout, attention (SDPA, MHA, GQA)
   optim.py                        SGD, Adam
+  lr_scheduler.py                 StepLR, CosineAnnealingLR, ExponentialLR, LinearLR, MultiStepLR
 ```
 
 <br>
@@ -214,9 +219,9 @@ tensorax/                       Python package
 
 | Status | |
 |:---:|---|
-| ✅ | Core ops · autograd · NN layers · norms · optimizers · losses · attention (4 CUDA kernels) · GQA · matmul (6 variants) |
-| 🚧 | Multi-head attention with projections · expanded benchmarking |
-| 🔮 | Conv2D · MaxPool2D · GELU/Swish · AdamW · LR schedulers · indexing/slicing · serialization · multi-GPU · mixed precision · DDP |
+| ✅ | Core ops · autograd · NN layers · norms · optimizers · losses · attention (4 CUDA kernels) · GQA · MHA · matmul (6 variants) · GELU/SiLU · Embedding · LR schedulers |
+| 🚧 | Expanded benchmarking · higher test coverage |
+| 🔮 | Conv2D · MaxPool2D · AdamW · indexing/slicing · serialization · DataLoader · multi-GPU · mixed precision · DDP · ONNX export |
 
 <br>
 

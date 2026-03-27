@@ -1,8 +1,9 @@
 # Development Guide
 
-**Status:** Production Ready (December 9, 2025)  
-**Test Status:** 229/234 tests passing (98.9%)  
-**Coverage:** 87%
+**Status:** Production Ready
+**Version:** 0.2.0
+**Test Status:** 433 tests passing (100%)
+**Coverage:** 95%
 
 This guide covers the development workflow for Tensorax.
 
@@ -46,13 +47,15 @@ tensorax/
 │   └── tensor_ops.cpp   # Main C++ entry point with Python bindings
 ├── tensorax/             # Python package
 │   ├── __init__.py
-│   ├── tensor.py        # Core Tensor class
-│   ├── functional.py    # Functional API
-│   ├── optim.py         # Optimizers
+│   ├── tensor.py        # Core Tensor class + autograd
+│   ├── functional.py    # Functional API (activations, losses, attention)
+│   ├── optim.py         # SGD, Adam
+│   ├── lr_scheduler.py  # StepLR, ExponentialLR, CosineAnnealingLR, LinearLR, MultiStepLR
 │   └── nn/             # Neural network modules
 │       ├── __init__.py
 │       ├── module.py    # Base Module class
-│       └── layers.py    # Layer implementations
+│       ├── layers.py    # Linear, Embedding, activations, norms, Dropout, Sequential
+│       └── attention/   # ScaledDotProductAttention, GQA, MultiHeadAttention
 ├── tests/              # Test suite
 ├── examples/           # Usage examples
 ├── docs/              # Documentation
@@ -77,12 +80,11 @@ CUDA_HOME=/usr/local/cuda python setup.py build_ext --inplace
 
 ## Running Tests
 
-### Test Status (December 9, 2025)
+### Test Status (March 2026)
 
-- ✅ **229 tests passing** (98.9% success rate)
-- 🟡 **5 tests skipped** (CUDA-only tests, require GPU)
+- ✅ **433 tests passing** (100% success rate)
 - 🔴 **0 tests failing**
-- 📊 **87% code coverage**
+- 📊 **95% code coverage**
 
 ### Run All Tests
 
@@ -133,18 +135,20 @@ start htmlcov/index.html  # Windows
 
 ### Module Coverage
 
-| Module               | Coverage | Status         |
-| -------------------- | -------- | -------------- |
-| constants/\*.py      | 100%     | ✅ Perfect     |
-| nn/**init**.py       | 100%     | ✅ Perfect     |
-| nn/layers.py         | 97%      | ✅ Excellent   |
-| optim.py             | 97%      | ✅ Excellent   |
-| functional.py        | 91%      | ✅ Good        |
-| **init**.py          | 86%      | ✅ Good        |
-| tensor.py            | 86%      | ⚠️ Core module |
-| nn/module.py         | 81%      | ⚠️ Can improve |
-| utils/type_checks.py | 80%      | ⚠️ Small file  |
-| utils/shape_utils.py | 70%      | 🔴 Needs work  |
+| Module                    | Coverage | Status         |
+| ------------------------- | -------- | -------------- |
+| constants/\*.py           | 100%     | ✅ Perfect     |
+| nn/\_\_init\_\_.py        | 100%     | ✅ Perfect     |
+| nn/module.py              | 100%     | ✅ Perfect     |
+| nn/attention/utils.py     | 100%     | ✅ Perfect     |
+| utils/shape\_utils.py     | 100%     | ✅ Perfect     |
+| utils/type\_checks.py     | 100%     | ✅ Perfect     |
+| functional.py             | 98%      | ✅ Excellent   |
+| lr\_scheduler.py          | 98%      | ✅ Excellent   |
+| optim.py                  | 97%      | ✅ Excellent   |
+| nn/layers.py              | 94%      | ✅ Excellent   |
+| tensor.py                 | 92%      | ✅ Good        |
+| nn/attention/layers.py    | 51%      | ⚠️ Needs tests |
 
 ## Code Style
 

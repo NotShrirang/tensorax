@@ -1,8 +1,8 @@
 # Tensorax Architecture
 
-**Status:** Production Ready (December 9, 2025)  
-**Version:** 0.1.0  
-**Test Coverage:** 87% (229/234 tests passing)
+**Status:** Production Ready
+**Version:** 0.2.0
+**Test Coverage:** 95% (433 tests passing)
 
 This document provides a comprehensive overview of Tensorax's architecture and design decisions.
 
@@ -35,7 +35,9 @@ csrc/
     └── kernels/        # Optimized CUDA kernels
         ├── elementwise.cu
         ├── reduction.cu
-        └── matmul.cu
+        ├── reduction.cuh
+        ├── matmul.cu
+        └── attn.cu
 ```
 
 **Key Design Decisions:**
@@ -70,9 +72,11 @@ High-level API for building neural networks:
 tensorax/
 ├── nn/
 │   ├── module.py        # Base Module class
-│   └── layers.py        # Pre-built layers
-├── functional.py        # Functional API
-└── optim.py            # Optimizers
+│   ├── layers.py        # Linear, activations, Embedding, norms, Dropout, Sequential
+│   └── attention/       # ScaledDotProductAttention, GroupedQueryAttention, MultiHeadAttention
+├── functional.py        # Functional API (activations, losses, attention)
+├── optim.py             # SGD, Adam
+└── lr_scheduler.py      # StepLR, ExponentialLR, CosineAnnealingLR, LinearLR, MultiStepLR
 ```
 
 **Design Patterns:**
@@ -237,26 +241,31 @@ __global__ void reduce_sum_kernel(...) {
 
 ### Completed Features ✅
 
-- [x] Complete autograd implementation with gradient tracking
+- [x] Complete autograd implementation with gradient tracking through 18+ ops
 - [x] All core tensor operations (element-wise, reduction, mathematical)
-- [x] Neural network layers (Linear, ReLU, Sigmoid, Tanh, Softmax, Dropout)
-- [x] Sequential container with recursive parameter collection
+- [x] Neural network layers (Linear, Embedding, Sequential)
+- [x] Activation functions (ReLU, Sigmoid, Tanh, Softmax, GELU, SiLU)
+- [x] Normalization layers (LayerNorm, RMSNorm, BatchNorm)
+- [x] Dropout with training/eval mode support
+- [x] Attention (Scaled Dot-Product, Flash Attention, Grouped Query Attention, Multi-Head Attention)
+- [x] 6 CUDA matmul kernel variants (naive → 2D block tiling)
+- [x] 4 CUDA attention kernels (naive → flash optimized)
 - [x] Optimizers (SGD with momentum, Adam with bias correction)
-- [x] Loss functions (MSE, Cross Entropy)
+- [x] Loss functions (MSE, Cross Entropy, Cross Entropy from logits)
+- [x] Learning rate schedulers (StepLR, ExponentialLR, CosineAnnealingLR, LinearLR, MultiStepLR)
 - [x] Device management (CPU/CUDA with automatic fallback)
-- [x] Tensor serialization (save/load)
 - [x] Broadcasting support
-- [x] Advanced indexing and slicing
+- [x] 433 tests, 95% coverage
 
 ### Future Roadmap 🔮
 
 #### Near-term
 
 - [ ] Conv2D and pooling layers (MaxPool2D, AvgPool2D)
-- [ ] Batch normalization and Layer normalization
-- [ ] More activation functions (LeakyReLU, GELU, Swish)
-- [ ] Learning rate schedulers (StepLR, ExponentialLR, CosineAnnealing)
-- [ ] Additional optimizers (RMSprop, AdamW, Adagrad)
+- [ ] Tensor indexing/slicing (`__getitem__`)
+- [ ] Additional optimizers (AdamW, RMSprop)
+- [ ] Model serialization (state_dict save/load)
+- [ ] DataLoader / Dataset abstraction
 
 #### Mid-term
 
@@ -270,6 +279,5 @@ __global__ void reduce_sum_kernel(...) {
 
 - [ ] Distributed training (DDP)
 - [ ] Dynamic graph optimization
-- [ ] Custom CUDA kernel DSL
 - [ ] Model quantization
 - [ ] Export to ONNX
