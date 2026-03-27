@@ -2,7 +2,7 @@
 Tensorax - High-performance tensor library with CUDA acceleration
 """
 
-__version__ = '0.1.7'
+__version__ = '0.2.0'
 
 from .tensor import Tensor
 from . import nn
