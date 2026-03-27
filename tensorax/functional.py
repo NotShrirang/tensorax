@@ -217,6 +217,29 @@ def cross_entropy_from_logits(logits: Tensor, targets: Tensor, reduce_mean: bool
 
 
 
+def gelu(x: Tensor) -> Tensor:
+    """GELU activation function: x * Phi(x), approximated as 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))."""
+    # Constants
+    sqrt_2_over_pi = 0.7978845608028654  # sqrt(2/pi)
+    coeff = 0.044715
+
+    # x^3
+    x_cubed = x * x * x
+    # inner = sqrt(2/pi) * (x + 0.044715 * x^3)
+    inner = (x + x_cubed * coeff) * sqrt_2_over_pi
+    # tanh(inner)
+    tanh_inner = tanh(inner)
+    # 0.5 * x * (1 + tanh_inner)
+    ones = Tensor.ones(x.shape, device=x.device)
+    result = x * (ones + tanh_inner) * 0.5
+    return result
+
+
+def silu(x: Tensor) -> Tensor:
+    """SiLU (Swish) activation function: x * sigmoid(x)."""
+    return x * sigmoid(x)
+
+
 def scaled_dot_product_attention(query: Tensor, key: Tensor, value: Tensor, mask: Optional[Tensor] = None) -> Tensor:
     """
     Scaled Dot-Product Attention.

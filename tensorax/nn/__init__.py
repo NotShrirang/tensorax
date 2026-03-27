@@ -9,12 +9,16 @@ from .layers import (
     Sigmoid,
     Tanh,
     Softmax,
+    GELU,
+    SiLU,
     Dropout,
+    Embedding,
     Sequential,
     RMSNorm,
     LayerNorm,
     BatchNorm,
 )
+from .attention.layers import MultiHeadAttention
 
 __all__ = [
     'Module',
@@ -23,9 +27,13 @@ __all__ = [
     'Sigmoid',
     'Tanh',
     'Softmax',
+    'GELU',
+    'SiLU',
     'Dropout',
+    'Embedding',
     'Sequential',
     'RMSNorm',
     'LayerNorm',
     'BatchNorm',
+    'MultiHeadAttention',
 ]

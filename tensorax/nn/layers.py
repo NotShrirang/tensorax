@@ -138,6 +138,88 @@ class Sequential(Module):
         return self._modules[str(index)]
 
 
+class GELU(Module):
+    """GELU activation layer."""
+
+    def forward(self, x: Tensor) -> Tensor:
+        return F.gelu(x)
+
+
+class SiLU(Module):
+    """SiLU (Swish) activation layer."""
+
+    def forward(self, x: Tensor) -> Tensor:
+        return F.silu(x)
+
+
+class Embedding(Module):
+    """A simple lookup table that stores embeddings of a fixed dictionary and size."""
+
+    def __init__(self, num_embeddings: int, embedding_dim: int):
+        super().__init__()
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+
+        # Initialize with random weights ~ N(0, 1)
+        weight_data = [random.gauss(0, 1) for _ in range(num_embeddings * embedding_dim)]
+        self._parameters['weight'] = Tensor(
+            weight_data,
+            shape=(num_embeddings, embedding_dim),
+            requires_grad=True,
+        )
+
+    @property
+    def weight(self) -> Tensor:
+        return self._parameters['weight']
+
+    def forward(self, indices: Tensor) -> Tensor:
+        weight_list = self._parameters['weight'].tolist()
+        idx_list = indices.tolist()
+
+        def _gather(idxs):
+            if isinstance(idxs, list):
+                return [_gather(i) for i in idxs]
+            idx = int(idxs)
+            if idx < 0 or idx >= self.num_embeddings:
+                raise IndexError(f"Embedding index {idx} out of range [0, {self.num_embeddings})")
+            return weight_list[idx]
+
+        out_data = _gather(idx_list)
+        # Compute output shape: indices.shape + (embedding_dim,)
+        out_shape = indices.shape + (self.embedding_dim,)
+
+        result = Tensor.__new__(Tensor)
+        from ..tensor import Tensor as _T
+        flat_data, _ = _T._flatten_data(out_data)
+        result._shape = out_shape
+        result._size = 1
+        for d in out_shape:
+            result._size *= d
+        result.dtype = self._parameters['weight'].dtype
+        result.device = self._parameters['weight'].device
+        result.grad = None
+
+        try:
+            from .. import _C
+            if _C:
+                result._c_tensor = _C.create_tensor_cpu(
+                    flat_data, list(out_shape), result.dtype
+                )
+            else:
+                result._c_tensor = None
+        except ImportError:
+            result._c_tensor = None
+
+        if self._parameters['weight'].requires_grad:
+            result.requires_grad = True
+            result._grad_fn = ('embedding', self._parameters['weight'], indices)
+        else:
+            result.requires_grad = False
+            result._grad_fn = None
+
+        return result
+
+
 class RMSNorm(Module):
     """Root Mean Square Normalization."""
     

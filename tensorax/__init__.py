@@ -8,6 +8,7 @@ from .tensor import Tensor
 from . import nn
 from . import optim
 from . import functional as F
+from . import lr_scheduler
 from .constants import *
 
 __all__ = [

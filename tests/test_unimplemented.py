@@ -72,12 +72,11 @@ class TestUnimplementedLayers:
             assert hn.shape == (1, 3, 20)
 
     def test_embedding_layer(self):
-        # Embedding layer
-        with pytest.raises(AttributeError):
-            layer = nn.Embedding(num_embeddings=1000, embedding_dim=50)
-            x = Tensor([[1, 5, 10]], dtype='int32')  # (batch, seq_len)
-            y = layer(x)
-            assert y.shape == (1, 3, 50)
+        # Embedding layer is now implemented
+        layer = nn.Embedding(num_embeddings=1000, embedding_dim=50)
+        x = Tensor([[1, 5, 10]], shape=(1, 3), dtype='float32')
+        y = layer(x)
+        assert y.shape == (1, 3, 50)
 
     def test_transformer_encoder_layer(self):
         # Transformer encoder layer

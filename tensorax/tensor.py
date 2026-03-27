@@ -793,6 +793,23 @@ class Tensor:
                 x, output = inputs[0], inputs[1] if len(inputs) > 1 else None
                 if x.requires_grad and output is not None:
                     x.backward(grad * output)
+            elif op == 'embedding':
+                # Scatter gradient rows back into weight matrix
+                weight, indices = inputs[0], inputs[1]
+                if weight.requires_grad:
+                    num_embeddings = weight.shape[0]
+                    embedding_dim = weight.shape[1]
+                    grad_weight_data = [0.0] * (num_embeddings * embedding_dim)
+                    grad_flat = _C.tensor_to_list(grad._c_tensor) if _C else []
+                    idx_flat = _C.tensor_to_list(indices._c_tensor) if _C else []
+                    for i, idx_val in enumerate(idx_flat):
+                        row = int(idx_val)
+                        offset_src = i * embedding_dim
+                        offset_dst = row * embedding_dim
+                        for j in range(embedding_dim):
+                            grad_weight_data[offset_dst + j] += grad_flat[offset_src + j]
+                    grad_weight = Tensor(grad_weight_data, shape=(num_embeddings, embedding_dim), device=weight.device)
+                    weight.backward(grad_weight)
     
     def __iter__(self):
         """Make tensor iterable (iterate over first dimension)."""
