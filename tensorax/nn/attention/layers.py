@@ -12,6 +12,7 @@ class ScaledDotProductAttention:
     
     def __repr__(self) -> str:
         return f"ScaledDotProductAttention()"
+
 class GroupedQueryAttention:
     """Grouped Query Attention (GQA) layer."""
     def __init__(self, num_heads: int, num_kv_heads: int):
