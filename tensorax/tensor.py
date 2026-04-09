@@ -620,39 +620,29 @@ class Tensor:
             if op == 'add':
                 if inputs[0].requires_grad:
                     grad_input = grad
-                    # Handle broadcasting: sum over dimensions that were broadcast
                     if inputs[0]._shape != grad._shape:
-                        # Need to sum and reshape gradient to match input shape
                         for i in range(len(grad._shape)):
                             if i >= len(inputs[0]._shape) or inputs[0]._shape[i] == 1:
                                 grad_input = grad_input.sum(dim=i)
                     inputs[0].backward(grad_input)
                 if inputs[1].requires_grad:
                     grad_input = grad
-                    # Handle broadcasting: sum over dimensions that were broadcast
                     if inputs[1]._shape != grad._shape:
-                        # Need to sum gradient over dimensions that were broadcast
                         axes_to_sum = []
-                        # Determine which axes to sum over
                         len_diff = len(grad._shape) - len(inputs[1]._shape)
                         for i in range(len(grad._shape)):
                             if i < len_diff:
-                                # This dimension doesn't exist in input[1], sum it
                                 axes_to_sum.append(i)
                             else:
-                                # Check if this dimension was broadcast (size 1 in input)
                                 input_idx = i - len_diff
                                 if input_idx < len(inputs[1]._shape) and inputs[1]._shape[input_idx] == 1 and grad._shape[i] > 1:
                                     axes_to_sum.append(i)
                         
-                        # Sum over all necessary axes
                         for axis in sorted(axes_to_sum, reverse=True):
                             grad_input = grad_input.sum(dim=axis)
                         
-                        # Reshape if needed to match original shape
                         if grad_input._shape != inputs[1]._shape:
-                            # For now, just ensure the gradient has the right shape
-                            pass
+                            grad_input = grad_input.reshape(inputs[1]._shape)
                     inputs[1].backward(grad_input)
             elif op == 'sub':
                 if inputs[0].requires_grad:
@@ -675,18 +665,14 @@ class Tensor:
                 if inputs[1].requires_grad:
                     inputs[1].backward(inputs[0].T @ grad)
             elif op == 'mse_loss':
-                # d(MSE)/d(pred) = 2 * (pred - target) / n
                 pred, target = inputs[0], inputs[1]
                 if pred.requires_grad:
                     n = pred.size
                     grad_input = (pred - target) * Tensor.full(pred.shape, 2.0 / n, device=pred.device)
-                    # For scalar loss, grad should be 1.0, so just use grad_input
                     pred.backward(grad_input)
             elif op == 'relu':
-                # d(ReLU)/dx = 1 if x > 0 else 0
                 x = inputs[0]
                 if x.requires_grad:
-                    # Create mask: 1 where x > 0, 0 elsewhere
                     x_data = x.tolist()
                     mask_data = [[1.0 if val > 0 else 0.0 for val in (row if isinstance(row, list) else [row])] 
                                  for row in (x_data if isinstance(x_data[0], list) else [x_data])]
@@ -695,36 +681,35 @@ class Tensor:
                     mask = Tensor(mask_data, device=x.device)
                     x.backward(grad * mask)
             elif op == 'sigmoid':
-                # d(sigmoid)/dx = sigmoid(x) * (1 - sigmoid(x))
                 x, output = inputs[0], inputs[1] if len(inputs) > 1 else None
                 if x.requires_grad and output is not None:
                     grad_input = output * (Tensor.ones(output.shape, device=output.device) - output)
                     x.backward(grad * grad_input)
             elif op == 'tanh':
-                # d(tanh)/dx = 1 - tanh(x)^2
                 x, output = inputs[0], inputs[1] if len(inputs) > 1 else None
                 if x.requires_grad and output is not None:
                     grad_input = Tensor.ones(output.shape, device=output.device) - (output * output)
                     x.backward(grad * grad_input)
             elif op == 'softmax':
-                # d(softmax)/dx = softmax(x) * (1 - softmax(x)) for each element
-                x, output, _ = inputs[0], inputs[1], inputs[2] if len(inputs) > 2 else None
+                x = inputs[0]
+                output = inputs[1] if len(inputs) > 1 else None
+                dim = inputs[2] if len(inputs) > 2 else -1
                 if x.requires_grad and output is not None:
-                    # Create Jacobian-vector product for softmax gradient
-                    # For simplicity, we compute element-wise gradient
-                    grad_input = output * (Tensor.ones(output.shape, device=output.device) - output)
-                    x.backward(grad * grad_input)
+                    if isinstance(dim, int) and dim < 0:
+                        dim = len(x.shape) + dim
+                    dot = (grad * output).sum(dim=dim)
+                    expand_shape = list(dot.shape)
+                    expand_shape.insert(dim, 1)
+                    dot_expanded = dot.reshape(tuple(expand_shape)).repeat_interleave(x.shape[dim], dim=dim)
+                    grad_input = output * (grad - dot_expanded)
+                    x.backward(grad_input)
             elif op == 'transpose':
-                # d(transpose)/dx = transpose(grad)
                 x = inputs[0]
                 if x.requires_grad:
-                    # Fix transpose gradient for specific dims if dims were provided
                     if len(inputs) > 1:
-                        # transpose with dim0 and dim1
                         dim0, dim1 = inputs[1], inputs[2]
                         x.backward(grad.transpose(dim0, dim1))
                     else:
-                        # regular T
                         x.backward(grad.T)
             elif op == 'reshape':
                 x = inputs[0]
@@ -733,9 +718,6 @@ class Tensor:
             elif op == 'repeat_interleave':
                 x, repeats, dim = inputs[0], inputs[1], inputs[2]
                 if x.requires_grad:
-                    # gradient of repeat_interleave involves summing the repeated sections back
-                    # This is slightly complex to implement efficiently via matrix math without a dedicated op
-                    # But essentially it's equivalent to reshaping backward and summing
                     grad_shape = list(grad.shape)
                     inner_shape = grad_shape[dim] // repeats
                     grad_shape[dim] = repeats
@@ -745,25 +727,21 @@ class Tensor:
                     summed_grad = reshaped_grad.sum(dim=dim)
                     x.backward(summed_grad)
             elif op == 'sqrt':
-                # d(sqrt(x))/dx = 1/(2*sqrt(x))
                 x, output = inputs[0], inputs[1] if len(inputs) > 1 else None
                 if x.requires_grad and output is not None:
                     grad_input = Tensor.full(output.shape, 0.5, device=output.device) / output
                     x.backward(grad * grad_input)
             elif op == 'pow':
-                # d(x^p)/dx = p * x^(p-1)
                 x, power = inputs[0], inputs[1]
                 if x.requires_grad:
                     grad_input = Tensor.full(x.shape, power, device=x.device) * (x ** (power - 1))
                     x.backward(grad * grad_input)
             elif op == 'sum':
-                # d(sum(x))/dx = grad broadcasted to x's shape
                 x, dim = inputs[0], inputs[1]
                 if x.requires_grad:
                     if dim is None:
                         grad_input = Tensor.full(x.shape, grad.tolist()[0], device=x.device)
                     else:
-                        # Broadcast grad along specified dimension
                         grad_shape = list(x.shape)
                         grad_shape[dim] = 1
                         grad_reshaped = Tensor(grad.tolist(), shape=tuple(grad_shape), device=grad.device)
@@ -772,7 +750,6 @@ class Tensor:
                             grad_input = grad_input.repeat_interleave(x.shape[dim], dim)
                     x.backward(grad_input)
             elif op == 'mean':
-                # d(mean(x))/dx = grad broadcasted to x's shape divided by number of elements reduced
                 x, dim = inputs[0], inputs[1]
                 if x.requires_grad:
                     if dim is None:
@@ -789,12 +766,64 @@ class Tensor:
                         grad_input = grad_input / n
                     x.backward(grad_input)
             elif op == 'exp':
-                # d(exp(x))/dx = exp(x)
                 x, output = inputs[0], inputs[1] if len(inputs) > 1 else None
                 if x.requires_grad and output is not None:
                     x.backward(grad * output)
+            elif op == 'log':
+                x = inputs[0]
+                if x.requires_grad:
+                    x.backward(grad / x)
+            elif op == 'cross_entropy':
+                pred, target = inputs[0], inputs[1]
+                if pred.requires_grad:
+                    epsilon = Tensor.full(pred.shape, 1e-12, device=pred.device)
+                    grad_input = target * Tensor.full(target.shape, -1.0, device=target.device) / (pred + epsilon)
+                    n = pred.shape[0] if len(pred.shape) > 1 else 1
+                    grad_input = grad_input * Tensor.full(grad_input.shape, 1.0 / n, device=grad_input.device)
+                    pred.backward(grad * grad_input)
+            elif op == 'cross_entropy_from_logits':
+                logits, targets = inputs[0], inputs[1]
+                reduce_mean = inputs[2] if len(inputs) > 2 else True
+                if logits.requires_grad:
+                    from . import functional as F
+                    probs = F.softmax(logits, dim=-1)
+                    batch_size = logits.shape[0] if len(logits.shape) > 1 else 1
+                    num_classes = logits.shape[-1]
+                    target_list = _C.tensor_to_list(targets._c_tensor) if _C else []
+                    one_hot_data = [0.0] * (batch_size * num_classes)
+                    if len(logits.shape) == 1:
+                        one_hot_data[int(target_list[0])] = 1.0
+                    else:
+                        for i, t in enumerate(target_list):
+                            one_hot_data[i * num_classes + int(t)] = 1.0
+                    one_hot = Tensor(one_hot_data, shape=logits.shape, device=logits.device)
+                    grad_input = probs - one_hot
+                    if reduce_mean:
+                        grad_input = grad_input * Tensor.full(grad_input.shape, 1.0 / batch_size, device=grad_input.device)
+                    logits.backward(grad * grad_input)
+            elif op == 'scaled_dot_product_attention':
+                query, key, value = inputs[0], inputs[1], inputs[2]
+                attn_mask = inputs[3] if len(inputs) > 3 else None
+                d_k = query.shape[-1]
+                scale = Tensor.full((), 1.0 / (d_k ** 0.5), device=query.device)
+                scores = (query @ key.transpose(-2, -1)) * scale
+                if attn_mask is not None:
+                    scores = scores + attn_mask
+                from . import functional as F
+                attn_weights = F.softmax(scores, dim=-1)
+                if value.requires_grad:
+                    value.backward(attn_weights.transpose(-2, -1) @ grad)
+                d_attn = grad @ value.transpose(-2, -1)
+                dot = (d_attn * attn_weights).sum(dim=-1)
+                expand_shape = list(dot.shape)
+                expand_shape.append(1)
+                dot_expanded = dot.reshape(tuple(expand_shape)).repeat_interleave(attn_weights.shape[-1], dim=-1)
+                d_scores = attn_weights * (d_attn - dot_expanded) * scale
+                if query.requires_grad:
+                    query.backward(d_scores @ key)
+                if key.requires_grad:
+                    key.backward(d_scores.transpose(-2, -1) @ query)
             elif op == 'embedding':
-                # Scatter gradient rows back into weight matrix
                 weight, indices = inputs[0], inputs[1]
                 if weight.requires_grad:
                     num_embeddings = weight.shape[0]
@@ -1084,7 +1113,6 @@ class Tensor:
         if _C:
             result._c_tensor = _C.log(self._c_tensor)
         
-        # Track gradient: d(log(x))/dx = 1/x
         if self.requires_grad:
             result.requires_grad = True
             result._grad_fn = ('log', self)

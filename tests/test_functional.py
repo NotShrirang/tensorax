@@ -100,9 +100,18 @@ class TestActivationFunctions:
         x = Tensor([[1, 2]], dtype='float32', requires_grad=True)
         y = F.softmax(x, dim=-1)
         y.backward(Tensor([[1, 1]], dtype='float32'))
-        # Gradient should exist
         assert x.grad is not None
-        assert x.grad == [[0.1966119408607483, 0.1966119259595871]]  # Precomputed gradient
+        grad_vals = x.grad.tolist()
+        assert abs(grad_vals[0][0]) < 1e-5
+        assert abs(grad_vals[0][1]) < 1e-5
+
+    def test_softmax_backward_nonuniform_grad(self):
+        x = Tensor([[1, 2, 3]], dtype='float32', requires_grad=True)
+        y = F.softmax(x, dim=-1)
+        y.backward(Tensor([[1, 0, 0]], dtype='float32'))
+        assert x.grad is not None
+        grad_vals = x.grad.tolist()[0]
+        assert abs(sum(grad_vals)) < 1e-5
 
 
 class TestLinearFunction:

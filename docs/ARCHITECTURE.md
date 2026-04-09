@@ -128,14 +128,10 @@ tensor._grad_fn = (op_name, *input_tensors)
 
 **Current Limitations:**
 
-- Static graph (rebuild each iteration)
-- Limited operation support
 - No higher-order gradients
 
 **Planned Enhancements:**
 
-- Dynamic graph with tape-based recording
-- Full operator coverage
 - Second-order derivatives
 
 ## CUDA Kernel Design
@@ -278,6 +274,6 @@ __global__ void reduce_sum_kernel(...) {
 #### Long-term
 
 - [ ] Distributed training (DDP)
-- [ ] Dynamic graph optimization
+- [ ] Graph optimization (operator fusion, dead-code elimination)
 - [ ] Model quantization
 - [ ] Export to ONNX
