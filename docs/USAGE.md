@@ -515,6 +515,12 @@ V = Tensor.randn((batch, heads, seq_len, d_k))
 # Basic attention
 out = F.scaled_dot_product_attention(Q, K, V)
 
+# High-performance specific kernels:
+out = F.scaled_dot_product_attention_mma(Q, K, V)              # Ampere+ Tensor Cores utilizing mma.sync
+out = F.scaled_dot_product_attention_flash(Q, K, V)            # Custom flash attention memory optimization
+out = F.scaled_dot_product_attention_flash_optimized(Q, K, V)  # Advanced Flash Attention
+out = F.scaled_dot_product_attention_tiled(Q, K, V)            # Shared memory block tiling
+
 # Causal (autoregressive) attention
 mask = create_causal_mask(seq_len, batch_size=batch, num_heads=heads)
 out = F.scaled_dot_product_attention(Q, K, V, mask=mask)

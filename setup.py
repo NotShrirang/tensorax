@@ -114,7 +114,6 @@ class BuildExtension(build_ext):
                         '--use_fast_math',
                         '-std=c++17',
                         '--compiler-options', '-fPIC',
-                        '-gencode=arch=compute_75,code=sm_75',  # T4, RTX 20xx
                         '-gencode=arch=compute_80,code=sm_80',  # A100
                         '-gencode=arch=compute_86,code=sm_86',  # RTX 30xx
                         '-gencode=arch=compute_89,code=sm_89',  # RTX 40xx (CUDA 11.8+)

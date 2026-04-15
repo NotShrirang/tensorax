@@ -38,7 +38,7 @@ No PyTorch. No NumPy. Pure C++/CUDA + Python.
 Only `pybind11` — no PyTorch, NumPy, or cuBLAS at runtime.
 
 ### ⚡ &nbsp; Hand-written CUDA kernels
-6 matmul variants, 4 attention kernels, 14 element-wise ops — all from scratch.
+6 matmul variants, 5 attention kernels, 14 element-wise ops — all from scratch.
 
 ### 🧠 &nbsp; Full autograd engine
 Reverse-mode autodiff with gradient tracking through 18+ operations.
@@ -140,7 +140,7 @@ for epoch in range(100):
 **Attention**
 - Scaled dot-product attention
 - Multi-Head Attention with projections
-- 4 CUDA kernels (naive → flash)
+- 5 CUDA kernels (naive → MMA)
 - Grouped Query Attention
 - Causal & padding masks
 
@@ -185,7 +185,19 @@ NumPy CPU (baseline)       █████████████████�
 
 > **2.31× faster** than NumPy · **43%** of PyTorch's cuBLAS kernels · all hand-written, zero library calls
 
-**Attention Kernels** — 4 implementations from naive to flash, supporting arbitrary batch/heads, asymmetric sequence lengths, and optional masks.
+**Attention Kernels** — fp32/fp16, B=4, H=8, S=256, Dk=512, Dv=512, 30 runs:
+
+```
+PyTorch SDPA (ref)         ████████████████████████████████████████████  0.04s  (2340×)
+Tensorax MMA Tensor Core   ██████████████████████████████████████        0.33s   (297×)  ← best
+Tensorax Optim. Flash      ██████████████████████████████████            0.52s   (187×)
+Tensorax Flash SDPA        ██████████████████████████                    3.10s    (31×)
+NumPy CPU (baseline)       ████████████████████                          7.06s    (14×)
+Tensorax Tiled SDPA        ██████                                       32.91s     (3×)
+Tensorax Naive SDPA        █                                            98.26s     (1×)
+```
+
+> **9.3× faster** than Flash SDPA via raw PTX inline assembly using `mma.sync` Ampere Tensor Cores and SFU intrinsics.
 
 <br>
 
@@ -197,7 +209,7 @@ NumPy CPU (baseline)       █████████████████�
 
 ```
 csrc/                           C++ / CUDA backend
-  cuda/kernels/                   elementwise · matmul (×6) · reduction · attention (×4)
+  cuda/kernels/                   elementwise · matmul (×6) · reduction · attention (×5)
   cpu/                            CPU fallback for all ops
   tensor_ops.{cpp,h}             pybind11 bindings
 

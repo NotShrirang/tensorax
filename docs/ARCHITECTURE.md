@@ -171,6 +171,24 @@ __global__ void matmul_kernel_tiled(...) {
 - Tiled computation to fit cache
 - Tuned block dimensions
 
+### Attention Kernels
+
+```cuda
+// Flash Attention / MMA Kernel
+__global__ void sdpa_kernel_mma(...) {
+    // Phase 1: Q*K^T using mma.sync Tensor Cores
+    // Phase 2: Online Softmax using SFU intrinsics
+    // Phase 3: P*V using mma.sync Tensor Cores
+}
+```
+
+**Optimizations:**
+
+- Hardware-accelerated Tensor Cores (`mma.sync`)
+- Fast SFU exponential approx (`ex2.approx`)
+- Vectorized 128-bit memory loads (`float4`)
+- Warp-level synchronization (`ldmatrix`)
+
 ### Reduction Operations
 
 ```cuda

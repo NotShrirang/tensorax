@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cfloat>
 #include <cstdint>
+#include <cuda_fp16.h>
 
 #define CEIL_DIV(numerator, denominator) (((numerator) + (denominator) - 1) / (denominator))
 
@@ -50,6 +51,54 @@ __device__ __forceinline__ void block_load_f32_vec4(
             dst[i] = src[i];
         }
     }
+}
+
+__device__ __forceinline__ void ldmatrix_m16n8_x4_b16(uint32_t regs[4], const void* smem_ptr) {
+    uint32_t smem_addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+    asm volatile(
+        "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+        : "=r"(regs[0]), "=r"(regs[1]), "=r"(regs[2]), "=r"(regs[3])
+        : "r"(smem_addr)
+    );
+}
+
+__device__ __forceinline__ void ldmatrix_m16n8_x2_b16(uint32_t regs[2], const void* smem_ptr) {
+    uint32_t smem_addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+    asm volatile(
+        "ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];\n"
+        : "=r"(regs[0]), "=r"(regs[1])
+        : "r"(smem_addr)
+    );
+}
+
+__device__ __forceinline__ void mma_m16n8k16_fp32_fp16_fp16_fp32(
+    float d[4], const uint32_t a[4], const uint32_t b[2], const float c[4]) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+        "{%0, %1, %2, %3}, "
+        "{%4, %5, %6, %7}, "
+        "{%8, %9}, "
+        "{%10, %11, %12, %13};\n"
+        : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
+          "r"(b[0]), "r"(b[1]),
+          "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3])
+    );
+}
+
+// PTX Intrinsic for Fast Approximate Exponential (Base 2)
+// This is much faster than the standard math.h expf()
+__device__ __forceinline__ float exp2_approx(float x) {
+    float res;
+    asm volatile("ex2.approx.ftz.f32 %0, %1;" : "=f"(res) : "f"(x));
+    return res;
+}
+
+// Wrapper for base-e exponential using the base-2 PTX intrinsic
+__device__ __forceinline__ float exp_approx(float x) {
+    // exp(x) = exp2(x * log2(e))
+    // log2(e) ≈ 1.4426950408889634
+    return exp2_approx(x * 1.4426950408889634f);
 }
 
 } // namespace
@@ -194,6 +243,145 @@ __global__ void sdpa_kernel_tiled(
     if (v_idx < d_v) {
         out[qkv_base * seq_len_q * d_v + q_idx * d_v + v_idx] = acc / sum_exp;
     }
+}
+
+__global__ void sdpa_kernel_mma(
+    const __half* __restrict__ Q,
+    const __half* __restrict__ K,
+    const __half* __restrict__ V,
+    const float* __restrict__ mask,
+    __half* __restrict__ out,
+    int batch_size,
+    int num_heads,
+    int seq_len_q,
+    int seq_len_k,
+    int d_k,
+    int d_v,
+    float scale
+) {
+    int b = blockIdx.z / num_heads;
+    int h = blockIdx.z % num_heads;
+    int q_start = blockIdx.y * 16;
+    
+    if (b >= batch_size || h >= num_heads || q_start >= seq_len_q) return;
+    
+    int tid = threadIdx.x;
+    int qkv_base = b * num_heads + h;
+    
+    const __half* q_base = Q + qkv_base * seq_len_q * d_k;
+    const __half* k_ptr  = K + qkv_base * seq_len_k * d_k;
+    const __half* v_ptr  = V + qkv_base * seq_len_k * d_v;
+    __half* out_base     = out + qkv_base * seq_len_q * d_v;
+
+    extern __shared__ __half mma_smem[]; 
+    __half* s_q = mma_smem;
+    __half* s_k = s_q + 16 * 16;
+    __half* s_v = s_k + 16 * 16;
+    float* s_scores = reinterpret_cast<float*>(s_v + 16 * 16);
+
+    int row = tid / 2;
+    int col_chunk = (tid % 2) * 8;
+
+    const float4* global_q_vec = reinterpret_cast<const float4*>(q_base + (q_start + row) * d_k + col_chunk);
+    float4* shared_q_vec       = reinterpret_cast<float4*>(s_q + row * 16 + col_chunk);
+    shared_q_vec[0] = global_q_vec[0];
+
+
+    const float4* global_k_vec = reinterpret_cast<const float4*>(k_ptr + row * d_k + col_chunk);
+    float4* shared_k_vec       = reinterpret_cast<float4*>(s_k + row * 16 + col_chunk);
+    shared_k_vec[0] = global_k_vec[0];
+
+    __syncthreads();
+
+    uint32_t reg_q[4]; 
+    uint32_t reg_k0[2];
+    uint32_t reg_k1[2];
+    
+    float acc0[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float acc1[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    
+    int smem_row = tid % 16;
+    int smem_col = (tid / 16) * 8;
+
+    ldmatrix_m16n8_x4_b16(reg_q, s_q + smem_row * 16 + smem_col);
+
+    ldmatrix_m16n8_x2_b16(reg_k0, s_k + smem_row * 16 + 0);
+
+    ldmatrix_m16n8_x2_b16(reg_k1, s_k + smem_row * 16 + 8);
+
+    mma_m16n8k16_fp32_fp16_fp16_fp32(acc0, reg_q, reg_k0, acc0);
+
+    mma_m16n8k16_fp32_fp16_fp16_fp32(acc1, reg_q, reg_k1, acc1);
+
+    int r0 = tid / 4;
+    int r1 = tid / 4 + 8;
+    int c0 = (tid % 4) * 2;
+
+    s_scores[r0 * 16 + c0 + 0] = acc0[0];
+    s_scores[r0 * 16 + c0 + 1] = acc0[1];
+    s_scores[r1 * 16 + c0 + 0] = acc0[2];
+    s_scores[r1 * 16 + c0 + 1] = acc0[3];
+
+    s_scores[r0 * 16 + c0 + 8 + 0] = acc1[0];
+    s_scores[r0 * 16 + c0 + 8 + 1] = acc1[1];
+    s_scores[r1 * 16 + c0 + 8 + 0] = acc1[2];
+    s_scores[r1 * 16 + c0 + 8 + 1] = acc1[3];
+    
+    __syncthreads();
+
+    if (tid < 16) {
+        float row_max = -FLT_MAX;
+
+        for (int i = 0; i < 16; i++) {
+            s_scores[tid * 16 + i] *= scale;
+            row_max = fmaxf(row_max, s_scores[tid * 16 + i]);
+        }
+        
+        float row_sum = 0.0f;
+        for (int i = 0; i < 16; i++) {
+            float e = exp_approx(s_scores[tid * 16 + i] - row_max);
+            s_scores[tid * 16 + i] = e;
+            row_sum += e;
+        }
+
+        for (int i = 0; i < 16; i++) {
+            s_k[tid * 16 + i] = __float2half(s_scores[tid * 16 + i] / row_sum); 
+        }
+    }
+    
+    __syncthreads();
+
+    int v_row = tid / 2;
+    int v_col_chunk = (tid % 2) * 8;
+    for (int i = 0; i < 8; i++) {
+        int col = v_col_chunk + i;
+        s_v[col * 16 + v_row] = v_ptr[v_row * d_v + col]; 
+    }
+    
+    __syncthreads();
+
+    ldmatrix_m16n8_x4_b16(reg_q, s_k + smem_row * 16 + smem_col);
+    
+    uint32_t reg_v0[2];
+    uint32_t reg_v1[2];
+    ldmatrix_m16n8_x2_b16(reg_v0, s_v + smem_row * 16 + 0);
+    ldmatrix_m16n8_x2_b16(reg_v1, s_v + smem_row * 16 + 8);
+
+    float out_acc0[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float out_acc1[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    
+    mma_m16n8k16_fp32_fp16_fp16_fp32(out_acc0, reg_q, reg_v0, out_acc0);
+    mma_m16n8k16_fp32_fp16_fp16_fp32(out_acc1, reg_q, reg_v1, out_acc1);
+
+    out_base[r0 * d_v + c0 + 0] = __float2half(out_acc0[0]);
+    out_base[r0 * d_v + c0 + 1] = __float2half(out_acc0[1]);
+    out_base[r1 * d_v + c0 + 0] = __float2half(out_acc0[2]);
+    out_base[r1 * d_v + c0 + 1] = __float2half(out_acc0[3]);
+
+    out_base[r0 * d_v + c0 + 8 + 0] = __float2half(out_acc1[0]);
+    out_base[r0 * d_v + c0 + 8 + 1] = __float2half(out_acc1[1]);
+    out_base[r1 * d_v + c0 + 8 + 0] = __float2half(out_acc1[2]);
+    out_base[r1 * d_v + c0 + 8 + 1] = __float2half(out_acc1[3]);
 }
 
 __global__ void sdpa_kernel_flash(
@@ -616,6 +804,80 @@ void sdpa_optimized_flash_cuda(
         Q, K, V, mask, out,
         batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v, scale, br, bc
     );
+
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+
+__global__ void cast_f32_to_f16(const float* in, __half* out, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        out[idx] = __float2half(in[idx]);
+    }
+}
+
+__global__ void cast_f16_to_f32(const __half* in, float* out, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        out[idx] = __half2float(in[idx]);
+    }
+}
+
+void sdpa_mma_cuda(
+    const float* Q,
+    const float* K,
+    const float* V,
+    const float* mask,
+    float* out,
+    int64_t batch_size,
+    int64_t num_heads,
+    int64_t seq_len_q,
+    int64_t seq_len_k,
+    int64_t d_k,
+    int64_t d_v
+) {
+    int64_t q_size = batch_size * num_heads * seq_len_q * d_k;
+    int64_t k_size = batch_size * num_heads * seq_len_k * d_k;
+    int64_t v_size = batch_size * num_heads * seq_len_k * d_v;
+    int64_t out_size = batch_size * num_heads * seq_len_q * d_v;
+
+    __half *d_Q_half, *d_K_half, *d_V_half, *d_out_half;
+    cudaMalloc(&d_Q_half, q_size * sizeof(__half));
+    cudaMalloc(&d_K_half, k_size * sizeof(__half));
+    cudaMalloc(&d_V_half, v_size * sizeof(__half));
+    cudaMalloc(&d_out_half, out_size * sizeof(__half));
+
+    int threads = 256;
+    cast_f32_to_f16<<<CEIL_DIV(q_size, threads), threads>>>(Q, d_Q_half, q_size);
+    cast_f32_to_f16<<<CEIL_DIV(k_size, threads), threads>>>(K, d_K_half, k_size);
+    cast_f32_to_f16<<<CEIL_DIV(v_size, threads), threads>>>(V, d_V_half, v_size);
+
+    float scale = 1.0f / sqrtf(static_cast<float>(d_k));
+
+    // Our kernel currently assumes sequence multiples of 16 and exact dims 16x16 for the warp.
+    dim3 block(32);
+    dim3 grid(
+        1,
+        CEIL_DIV(seq_len_q, 16),
+        batch_size * num_heads
+    );
+
+    // SMEM = sizeof(__half) * (Q_tile + K_tile + V_tile + scores)
+    // 256 + 256 + 256 + 512 (float scores) = 1536 bytes
+    size_t smem_size = (16 * 16 * 3) * sizeof(__half) + (16 * 16) * sizeof(float);
+
+    sdpa_kernel_mma<<<grid, block, smem_size>>>(
+        d_Q_half, d_K_half, d_V_half, mask, d_out_half,
+        batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v, scale
+    );
+
+    cast_f16_to_f32<<<CEIL_DIV(out_size, threads), threads>>>(d_out_half, out, out_size);
+
+    CUDA_CHECK(cudaFree(d_Q_half));
+    CUDA_CHECK(cudaFree(d_K_half));
+    CUDA_CHECK(cudaFree(d_V_half));
+    CUDA_CHECK(cudaFree(d_out_half));
 
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());

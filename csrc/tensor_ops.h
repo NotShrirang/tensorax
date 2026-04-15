@@ -167,6 +167,10 @@ namespace tensorax
                          float *out, int64_t batch_size, int64_t num_heads,
                          int64_t seq_len_q, int64_t seq_len_k, int64_t d_k, int64_t d_v);
 
+    void sdpa_mma_cuda(const float *Q, const float *K, const float *V, const float *mask,
+                       float *out, int64_t batch_size, int64_t num_heads,
+                       int64_t seq_len_q, int64_t seq_len_k, int64_t d_k, int64_t d_v);
+
     void sdpa_optimized_flash_cuda(const float *Q, const float *K, const float *V, const float *mask,
                                   float *out, int64_t batch_size, int64_t num_heads,
                                   int64_t seq_len_q, int64_t seq_len_k, int64_t d_k, int64_t d_v);

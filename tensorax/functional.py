@@ -359,5 +359,8 @@ def scaled_dot_product_attention_tiled(query: Tensor, key: Tensor, value: Tensor
 def scaled_dot_product_attention_flash(query: Tensor, key: Tensor, value: Tensor, mask: Optional[Tensor] = None) -> Tensor:
     return _sdpa_variant(query, key, value, mask, _C.scaled_dot_product_attention_flash)
 
+def scaled_dot_product_attention_mma(query: Tensor, key: Tensor, value: Tensor, mask: Optional[Tensor] = None) -> Tensor:
+    return _sdpa_variant(query, key, value, mask, _C.scaled_dot_product_attention_mma)
+
 def scaled_dot_product_attention_flash_optimized(query: Tensor, key: Tensor, value: Tensor, mask: Optional[Tensor] = None) -> Tensor:
     return _sdpa_variant(query, key, value, mask, _C.scaled_dot_product_attention_flash_optimized)

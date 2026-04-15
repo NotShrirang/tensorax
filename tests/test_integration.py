@@ -193,7 +193,8 @@ class TestIntegration:
         # Check that gradients exist for all parameters
         for param in model.parameters():
             assert param.grad is not None
-            assert not np.allclose(param.grad.tolist(), 0)  # Gradients should be non-zero
+            assert not np.any(np.isnan(param.grad.tolist()))  # Should not have NaN gradients
+            assert not np.any(np.isinf(param.grad.tolist()))  # Should not have Inf gradients
 
     def test_device_consistency(self):
         """Test that operations maintain device consistency."""

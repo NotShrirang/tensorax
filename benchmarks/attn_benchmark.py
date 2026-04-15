@@ -50,6 +50,13 @@ def sdpa_flash():
     torch.cuda.synchronize()
     return c
 
+# Benchmarking MMA SDPA
+def sdpa_mma():
+    torch.cuda.synchronize()
+    c = F.scaled_dot_product_attention_mma(q_t, k_t, v_t)
+    torch.cuda.synchronize()
+    return c
+
 # Benchmarking optimized flash SDPA
 def sdpa_flash_optimized():
     torch.cuda.synchronize()
@@ -84,6 +91,7 @@ print("Warming up...")
 sdpa_naive()
 sdpa_tiled()
 sdpa_flash()
+sdpa_mma()
 sdpa_flash_optimized()
 sdpa_numpy()
 sdpa_pytorch()
@@ -99,6 +107,9 @@ print(f"Tiled SDPA time over {times} runs: {time_tiled} seconds | Time per run: 
 
 time_flash = timeit.timeit(sdpa_flash, number=times)
 print(f"Flash SDPA time over {times} runs: {time_flash} seconds | Time per run: {time_flash / times:.4f} seconds | TFLOPS: {compute_tflops(time_flash, batch, heads, seq_len, d_k, d_v):.2f}")
+
+time_mma = timeit.timeit(sdpa_mma, number=times)
+print(f"MMA SDPA time over {times} runs: {time_mma} seconds | Time per run: {time_mma / times:.4f} seconds | TFLOPS: {compute_tflops(time_mma, batch, heads, seq_len, d_k, d_v):.2f}")
 
 time_flash_optimized = timeit.timeit(sdpa_flash_optimized, number=times)
 print(f"Optimized Flash SDPA time over {times} runs: {time_flash_optimized} seconds | Time per run: {time_flash_optimized / times:.4f} seconds | TFLOPS: {compute_tflops(time_flash_optimized, batch, heads, seq_len, d_k, d_v):.2f}")
