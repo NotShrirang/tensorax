@@ -1,14 +1,8 @@
-<div align="center">
+# Tensorax
 
-<br>
+Tensorax is a deep learning framework written from scratch in C++/CUDA with a Python frontend. Every kernel — matmul, attention, elementwise ops, reductions — is hand-written. No PyTorch, no NumPy, no cuBLAS at runtime. The only dependency is `pybind11` for the C++/Python bridge.
 
-# ⚡ Tensorax
-
-### A from-scratch tensor library with hand-written CUDA kernels.
-
-No PyTorch. No NumPy. Pure C++/CUDA + Python.
-
-<br>
+The goal is a clean, readable implementation of a DL framework from first principles that also runs fast on real hardware. The MMA attention kernel uses inline PTX assembly to hit Ampere Tensor Cores, and the best matmul variant runs at ~3x NumPy speed — all without calling into any external math library.
 
 [![PyPI](https://img.shields.io/pypi/v/tensorax.svg?style=flat-square&color=blueviolet)](https://pypi.org/project/tensorax/)
 [![Python](https://img.shields.io/badge/python-3.9+-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/downloads/)
@@ -16,70 +10,29 @@ No PyTorch. No NumPy. Pure C++/CUDA + Python.
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 [![CUDA](https://img.shields.io/badge/CUDA-11.0+-76B900?style=flat-square&logo=nvidia&logoColor=white)](https://developer.nvidia.com/cuda-toolkit)
 [![Tests](https://img.shields.io/github/actions/workflow/status/NotShrirang/tensorax/tests.yml?label=tests&style=flat-square)](https://github.com/NotShrirang/tensorax/actions/workflows/tests.yml)
-[![Coverage](https://img.shields.io/badge/coverage-98%25-brightgreen?style=flat-square)](https://github.com/NotShrirang/tensorax/actions/workflows/coverage.yml)
 
-<br>
-
-[Usage Guide](docs/USAGE.md) · [Architecture](docs/ARCHITECTURE.md) · [Contributing](docs/DEVELOPMENT.md) · [Examples](examples/)
-
-<br>
-
-</div>
-
----
-
-<br>
-
-<table>
-<tr>
-<td width="50%">
-
-### 🔩 &nbsp; Zero heavy dependencies
-Only `pybind11` — no PyTorch, NumPy, or cuBLAS at runtime.
-
-### ⚡ &nbsp; Hand-written CUDA kernels
-6 matmul variants, 5 attention kernels, 14 element-wise ops — all from scratch.
-
-### 🧠 &nbsp; Full autograd engine
-Reverse-mode autodiff with gradient tracking through 18+ operations.
-
-</td>
-<td width="50%">
-
-### 🎯 &nbsp; PyTorch-like API
-Familiar `Tensor`, `nn.Module`, `optim.Adam`, `lr_scheduler` interface — minimal learning curve.
-
-### 🧱 &nbsp; Batteries included
-Linear, Embedding, GELU, SiLU, LayerNorm, BatchNorm, Dropout, MultiHeadAttention, GQA, Flash Attention, LR schedulers — ready to train.
-
-### 📚 &nbsp; Built to learn from
-Clean, readable implementation of a DL framework from first principles.
-
-</td>
-</tr>
-</table>
-
-<br>
-
----
-
-<br>
-
-## Get Started
+## Quick start
 
 ```bash
 pip install tensorax
 ```
 
+The API is intentionally PyTorch-like, so the learning curve is minimal:
+
 ```python
 from tensorax import Tensor, nn, optim, lr_scheduler, functional as F
 
-# Build
-model = nn.Sequential(nn.Linear(4, 8), nn.GELU(), nn.LayerNorm(8), nn.Linear(8, 3))
+# define a model
+model = nn.Sequential(
+    nn.Linear(4, 8),
+    nn.GELU(),
+    nn.LayerNorm(8),
+    nn.Linear(8, 3),
+)
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
 
-# Train
+# train
 for epoch in range(100):
     loss = F.mse_loss(model(x_train), y_train)
     optimizer.zero_grad()
@@ -88,193 +41,79 @@ for epoch in range(100):
     scheduler.step()
 ```
 
-> **→** Full usage guide with all APIs, code examples, and details: **[docs/USAGE.md](docs/USAGE.md)**
+More examples in [`examples/`](examples/) and the full API reference in [`docs/USAGE.md`](docs/USAGE.md).
 
-<br>
+## What's implemented
 
----
+**Tensor core.** CPU and CUDA backends with automatic fallback. Broadcasting arithmetic, `reshape`, `transpose`, `sum`, `mean`, `exp`, `log`, `sqrt`, `pow`. Reverse-mode autograd through 18+ operations. 13 dtype constants.
 
-<br>
+**Layers.** `Linear`, `Embedding`, `Sequential`, `Dropout`. Activations: `ReLU`, `Sigmoid`, `Tanh`, `Softmax`, `GELU`, `SiLU`. Norms: `LayerNorm`, `RMSNorm`, `BatchNorm`.
 
-## What's Inside
+**Attention.** Scaled dot-product attention, Multi-Head Attention, and Grouped Query Attention — each backed by 5 CUDA kernel variants (naive, tiled, flash, optimized flash, MMA Tensor Core). Causal and padding mask support.
 
-<br>
+**Training.** SGD with momentum, Adam with bias correction. MSE, cross-entropy, and cross-entropy-from-logits losses. 5 LR schedulers: StepLR, CosineAnnealingLR, ExponentialLR, LinearLR, MultiStepLR.
 
-<table>
-<tr>
-<td width="33%" valign="top">
+**CUDA kernels.** 6 matmul implementations (naive through 2D block tiling), 5 attention kernels, 14 element-wise ops. Shared memory tiling, coalesced access patterns, and `mma.sync` Tensor Core instructions where it matters.
 
-**Core**
-- Tensor with CPU ↔ CUDA
-- Broadcasting arithmetic
-- `sum`, `mean` with keepdim
-- `reshape`, `transpose`
-- `exp`, `log`, `sqrt`, `pow`
-- 13 dtype constants
+## Benchmarks
 
-</td>
-<td width="33%" valign="top">
-
-**Neural Networks**
-- `Linear`, `Embedding`, `Sequential`
-- `ReLU`, `Sigmoid`, `Tanh`, `Softmax`, `GELU`, `SiLU`
-- `LayerNorm`, `RMSNorm`, `BatchNorm`
-- `Dropout`
-- `Module` base class
-
-</td>
-<td width="33%" valign="top">
-
-**Training**
-- `SGD` with momentum
-- `Adam` with bias correction
-- `MSE`, `CrossEntropy`, `CE from logits`
-- 5 LR schedulers (Step, Cosine, Exponential, Linear, MultiStep)
-- Autograd through 18+ ops
-
-</td>
-</tr>
-<tr>
-<td width="33%" valign="top">
-
-**Attention**
-- Scaled dot-product attention
-- Multi-Head Attention with projections
-- 5 CUDA kernels (naive → MMA)
-- Grouped Query Attention
-- Causal & padding masks
-
-</td>
-<td width="33%" valign="top">
-
-**CUDA Kernels**
-- 6 matmul implementations
-- 14 element-wise ops
-- Parallel reductions
-- Tiled + coalesced access
-
-</td>
-<td width="33%" valign="top">
-
-**Infra**
-- 433 tests, 95% coverage
-- CI/CD with GitHub Actions
-- `pybind11` bindings
-- Automatic CUDA fallback
-
-</td>
-</tr>
-</table>
-
-<br>
-
----
-
-<br>
-
-## Performance
-
-**Matrix Multiplication** — fp32, 3×1024×1024, 100 runs:
+Matmul — fp32, 3x1024x1024, 100 iterations:
 
 ```
-PyTorch CUDA (ref)         ████████████████████████████████████████████  0.41s  (4.51×)
-Tensorax 1D Block Tiling   ██████████████████████████████████████████    0.95s  (2.31×)  ← best
-Tensorax Tiled             ████████████████████████████████              1.22s  (1.80×)
-NumPy CPU (baseline)       █████████████████████████                    1.85s  (1.00×)
+PyTorch CUDA (cuBLAS)      0.08s  22.24x
+Tensorax 2D Block Tiling   0.58s   2.97x  <- best
+Tensorax 1D Block Tiling   0.64s   2.68x
+Tensorax Tiled             0.83s   2.05x
+Tensorax Cache Blocking    0.98s   1.75x
+Tensorax SM Coalesced      1.14s   1.50x
+Tensorax Default           1.18s   1.45x
+NumPy CPU (baseline)       1.71s   1.00x
 ```
 
-> **2.31× faster** than NumPy · **43%** of PyTorch's cuBLAS kernels · all hand-written, zero library calls
-
-**Attention Kernels** — fp32/fp16, B=4, H=8, S=256, Dk=512, Dv=512, 30 runs:
+Attention — fp32/fp16, B=4 H=8 S=256 Dk=512 Dv=512, 30 iterations:
 
 ```
-PyTorch SDPA (ref)         ████████████████████████████████████████████  0.04s  (2340×)
-Tensorax MMA Tensor Core   ██████████████████████████████████████        0.33s   (297×)  ← best
-Tensorax Optim. Flash      ██████████████████████████████████            0.52s   (187×)
-Tensorax Flash SDPA        ██████████████████████████                    3.10s    (31×)
-NumPy CPU (baseline)       ████████████████████                          7.06s    (14×)
-Tensorax Tiled SDPA        ██████                                       32.91s     (3×)
-Tensorax Naive SDPA        █                                            98.26s     (1×)
+PyTorch SDPA               0.04s   2340x
+Tensorax MMA Tensor Core   0.33s    297x  <- best
+Tensorax Optim. Flash      0.52s    187x
+Tensorax Flash SDPA        3.10s     31x
+NumPy CPU (baseline)       7.06s     14x
+Tensorax Tiled SDPA       32.91s      3x
+Tensorax Naive SDPA       98.26s      1x
 ```
 
-> **9.3× faster** than Flash SDPA via raw PTX inline assembly using `mma.sync` Ampere Tensor Cores and SFU intrinsics.
+The MMA kernel achieves a 9.3x speedup over the flash kernel by dropping into inline PTX to use `mma.sync` Ampere Tensor Core instructions and SFU fast-math intrinsics. Still ~8x behind PyTorch's heavily optimized SDPA — closing that gap is ongoing work.
 
-<br>
-
----
-
-<br>
-
-## Project Structure
+## Project layout
 
 ```
-csrc/                           C++ / CUDA backend
-  cuda/kernels/                   elementwise · matmul (×6) · reduction · attention (×5)
-  cpu/                            CPU fallback for all ops
-  tensor_ops.{cpp,h}             pybind11 bindings
+csrc/
+  cuda/kernels/          elementwise, matmul (x6), reduction, attention (x5)
+  cpu/                   CPU fallback for all ops
+  tensor_ops.cpp/.h      pybind11 bindings
 
-tensorax/                       Python package
-  tensor.py                       Tensor class + autograd
-  functional.py                   F.relu, F.gelu, F.silu, F.softmax, F.sdpa, ...
-  nn/                             Linear, Embedding, norms, dropout, attention (SDPA, MHA, GQA)
-  optim.py                        SGD, Adam
-  lr_scheduler.py                 StepLR, CosineAnnealingLR, ExponentialLR, LinearLR, MultiStepLR
+tensorax/
+  tensor.py              Tensor class + autograd engine
+  functional.py          F.relu, F.gelu, F.softmax, F.sdpa, losses, ...
+  nn/                    Linear, Embedding, norms, dropout, attention (MHA, GQA)
+  optim.py               SGD, Adam
+  lr_scheduler.py        StepLR, CosineAnnealingLR, ExponentialLR, LinearLR, MultiStepLR
 ```
-
-<br>
-
----
-
-<br>
 
 ## Roadmap
 
-| Status | |
-|:---:|---|
-| ✅ | Core ops · autograd · NN layers · norms · optimizers · losses · attention (4 CUDA kernels) · GQA · MHA · matmul (6 variants) · GELU/SiLU · Embedding · LR schedulers |
-| 🚧 | Expanded benchmarking · higher test coverage |
-| 🔮 | Conv2D · MaxPool2D · AdamW · indexing/slicing · serialization · DataLoader · multi-GPU · mixed precision · DDP · ONNX export |
+What's here now: core tensor ops, autograd, all the layers/norms/activations listed above, two optimizers, five LR schedulers, three loss functions, five attention kernels, six matmul variants, MHA, GQA, embeddings.
 
-<br>
+What's next: Conv2D, MaxPool2D, AdamW, tensor indexing/slicing, model serialization, DataLoader, multi-GPU, mixed precision, DDP, ONNX export.
 
----
+## Docs
 
-<br>
-
-## Documentation
-
-| | |
-|---|---|
-| **[Usage Guide](docs/USAGE.md)** | API reference, code examples, training patterns |
-| **[Architecture](docs/ARCHITECTURE.md)** | System design, kernel strategy, autograd internals |
-| **[Development](docs/DEVELOPMENT.md)** | Build, test, contribute |
-| **[Examples](examples/)** | Runnable scripts for common tasks |
-
-<br>
-
----
-
-<br>
-
-## Contributing
-
-```
-Fork → Branch → Commit → PR
-```
-
-See **[DEVELOPMENT.md](docs/DEVELOPMENT.md)** for build instructions and guidelines.
-
-<br>
-
----
-
-<br>
-
-<div align="center">
+- [Usage Guide](docs/USAGE.md) — full API reference with code examples
+- [Architecture](docs/ARCHITECTURE.md) — system design, kernel strategy, autograd internals
+- [Development](docs/DEVELOPMENT.md) — building from source, testing, contributing
+- [Examples](examples/) — runnable scripts
 
 ## Citation
-
-</div>
 
 ```bibtex
 @software{tensorax2025,
@@ -285,18 +124,6 @@ See **[DEVELOPMENT.md](docs/DEVELOPMENT.md)** for build instructions and guideli
 }
 ```
 
-<br>
+## License
 
----
-
-<br>
-
-<div align="center">
-
-**[GitHub](https://github.com/NotShrirang)** &nbsp;·&nbsp; **[Issues](https://github.com/NotShrirang/tensorax/issues)** &nbsp;·&nbsp; **[Discussions](https://github.com/NotShrirang/tensorax/discussions)**
-
-Built with ❤️ by [@NotShrirang](https://github.com/NotShrirang)
-
-⭐ Star if you find this useful
-
-</div>
+[MIT](LICENSE)
