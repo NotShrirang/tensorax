@@ -80,10 +80,10 @@ def sdpa_pytorch():
     torch.cuda.synchronize()
     return c
 
-def compute_tflops(time_sec, batch, heads, seq_len, d_k, d_v):
-    # Total FLOPs for SDPA: 4 * B * H * S^2 * Dk + 2 * B * H * S^2 * Dv
+def compute_tflops(time_sec, batch, heads, seq_len, d_k, d_v, times):
+    # Total FLOPs for one SDPA run: 4 * B * H * S^2 * Dk + 2 * B * H * S^2 * Dv
     total_flops = (4 * batch * heads * seq_len**2 * d_k) + (2 * batch * heads * seq_len**2 * d_v)
-    tflops = total_flops / (time_sec * 1e12)
+    tflops = (total_flops * times) / (time_sec * 1e12)
     return tflops
 
 # Warm-up run
@@ -100,22 +100,22 @@ print("Warm-up done.")
 print(f"Starting benchmarks... (B={batch}, H={heads}, S={seq_len}, Dk={d_k}, Dv={d_v})")
 
 time_naive = timeit.timeit(sdpa_naive, number=times)
-print(f"Naive SDPA time over {times} runs: {time_naive} seconds | Time per run: {time_naive / times:.4f} seconds | TFLOPS: {compute_tflops(time_naive, batch, heads, seq_len, d_k, d_v):.2f}")
+print(f"Naive SDPA time over {times} runs: {time_naive} seconds | Time per run: {time_naive / times:.4f} seconds | TFLOPS: {compute_tflops(time_naive, batch, heads, seq_len, d_k, d_v, times):.2f}")
 
 time_tiled = timeit.timeit(sdpa_tiled, number=times)
-print(f"Tiled SDPA time over {times} runs: {time_tiled} seconds | Time per run: {time_tiled / times:.4f} seconds | TFLOPS: {compute_tflops(time_tiled, batch, heads, seq_len, d_k, d_v):.2f}")
+print(f"Tiled SDPA time over {times} runs: {time_tiled} seconds | Time per run: {time_tiled / times:.4f} seconds | TFLOPS: {compute_tflops(time_tiled, batch, heads, seq_len, d_k, d_v, times):.2f}")
 
 time_flash = timeit.timeit(sdpa_flash, number=times)
-print(f"Flash SDPA time over {times} runs: {time_flash} seconds | Time per run: {time_flash / times:.4f} seconds | TFLOPS: {compute_tflops(time_flash, batch, heads, seq_len, d_k, d_v):.2f}")
+print(f"Flash SDPA time over {times} runs: {time_flash} seconds | Time per run: {time_flash / times:.4f} seconds | TFLOPS: {compute_tflops(time_flash, batch, heads, seq_len, d_k, d_v, times):.2f}")
 
 time_mma = timeit.timeit(sdpa_mma, number=times)
-print(f"MMA SDPA time over {times} runs: {time_mma} seconds | Time per run: {time_mma / times:.4f} seconds | TFLOPS: {compute_tflops(time_mma, batch, heads, seq_len, d_k, d_v):.2f}")
+print(f"MMA SDPA time over {times} runs: {time_mma} seconds | Time per run: {time_mma / times:.4f} seconds | TFLOPS: {compute_tflops(time_mma, batch, heads, seq_len, d_k, d_v, times):.2f}")
 
 time_flash_optimized = timeit.timeit(sdpa_flash_optimized, number=times)
-print(f"Optimized Flash SDPA time over {times} runs: {time_flash_optimized} seconds | Time per run: {time_flash_optimized / times:.4f} seconds | TFLOPS: {compute_tflops(time_flash_optimized, batch, heads, seq_len, d_k, d_v):.2f}")
+print(f"Optimized Flash SDPA time over {times} runs: {time_flash_optimized} seconds | Time per run: {time_flash_optimized / times:.4f} seconds | TFLOPS: {compute_tflops(time_flash_optimized, batch, heads, seq_len, d_k, d_v, times):.2f}")
 
 time_numpy = timeit.timeit(sdpa_numpy, number=times)
-print(f"Numpy SDPA time over {times} runs: {time_numpy} seconds | Time per run: {time_numpy / times:.4f} seconds | TFLOPS: {compute_tflops(time_numpy, batch, heads, seq_len, d_k, d_v):.2f}")
+print(f"Numpy SDPA time over {times} runs: {time_numpy} seconds | Time per run: {time_numpy / times:.4f} seconds | TFLOPS: {compute_tflops(time_numpy, batch, heads, seq_len, d_k, d_v, times):.2f}")
 
 time_pytorch = timeit.timeit(sdpa_pytorch, number=times)
-print(f"PyTorch SDPA time over {times} runs: {time_pytorch} seconds | Time per run: {time_pytorch / times:.4f} seconds | TFLOPS: {compute_tflops(time_pytorch, batch, heads, seq_len, d_k, d_v):.2f}")
+print(f"PyTorch SDPA time over {times} runs: {time_pytorch} seconds | Time per run: {time_pytorch / times:.4f} seconds | TFLOPS: {compute_tflops(time_pytorch, batch, heads, seq_len, d_k, d_v, times):.2f}")
