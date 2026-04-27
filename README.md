@@ -73,16 +73,16 @@ NumPy CPU (baseline)       1.71s   1.00x
 Attention — fp32/fp16, B=4 H=8 S=256 Dk=512 Dv=512, 30 iterations:
 
 ```
-PyTorch SDPA               0.04s   2340x
-Tensorax MMA Tensor Core   0.33s    297x  <- best
-Tensorax Optim. Flash      0.52s    187x
-Tensorax Flash SDPA        3.10s     31x
-NumPy CPU (baseline)       7.06s     14x
-Tensorax Tiled SDPA       32.91s      3x
-Tensorax Naive SDPA       98.26s      1x
+PyTorch SDPA               0.04s   2480x
+Tensorax MMA Tensor Core   0.16s    565x  <- best
+Tensorax Optim. Flash      0.41s    227x
+Tensorax Flash SDPA        2.92s     32x
+NumPy CPU (baseline)       6.36s     15x
+Tensorax Tiled SDPA       31.25s      3x
+Tensorax Naive SDPA       92.71s      1x
 ```
 
-The MMA kernel achieves a 9.3x speedup over the flash kernel by dropping into inline PTX to use `mma.sync` Ampere Tensor Core instructions and SFU fast-math intrinsics. Still ~8x behind PyTorch's heavily optimized SDPA — closing that gap is ongoing work.
+The MMA kernel achieves a 41x speedup over the flash kernel by dropping into inline PTX to use `mma.sync` Ampere Tensor Core instructions and SFU fast-math intrinsics, with the fp32↔fp16 casts fused directly into the kernel's shared-memory load/store path (eliminates 4 cast launches per call). Still ~4.4x behind PyTorch's heavily optimized SDPA — closing that gap is ongoing work.
 
 ## Project layout
 

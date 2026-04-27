@@ -246,11 +246,11 @@ __global__ void sdpa_kernel_tiled(
 }
 
 __global__ void sdpa_kernel_mma(
-    const __half* __restrict__ Q,
-    const __half* __restrict__ K,
-    const __half* __restrict__ V,
+    const float* __restrict__ Q,
+    const float* __restrict__ K,
+    const float* __restrict__ V,
     const float* __restrict__ mask,
-    __half* __restrict__ out,
+    float* __restrict__ out,
     int batch_size,
     int num_heads,
     int seq_len_q,
@@ -262,18 +262,18 @@ __global__ void sdpa_kernel_mma(
     int b = blockIdx.z / num_heads;
     int h = blockIdx.z % num_heads;
     int q_start = blockIdx.y * 16;
-    
+
     if (b >= batch_size || h >= num_heads || q_start >= seq_len_q) return;
-    
+
     int tid = threadIdx.x;
     int qkv_base = b * num_heads + h;
-    
-    const __half* q_base = Q + qkv_base * seq_len_q * d_k;
-    const __half* k_ptr  = K + qkv_base * seq_len_k * d_k;
-    const __half* v_ptr  = V + qkv_base * seq_len_k * d_v;
-    __half* out_base     = out + qkv_base * seq_len_q * d_v;
 
-    extern __shared__ __half mma_smem[]; 
+    const float* q_base = Q + qkv_base * seq_len_q * d_k;
+    const float* k_ptr  = K + qkv_base * seq_len_k * d_k;
+    const float* v_ptr  = V + qkv_base * seq_len_k * d_v;
+    float* out_base     = out + qkv_base * seq_len_q * d_v;
+
+    extern __shared__ __half mma_smem[];
     __half* s_q = mma_smem;
     __half* s_k = s_q + 16 * 16;
     __half* s_v = s_k + 16 * 16;
@@ -282,14 +282,25 @@ __global__ void sdpa_kernel_mma(
     int row = tid / 2;
     int col_chunk = (tid % 2) * 8;
 
-    const float4* global_q_vec = reinterpret_cast<const float4*>(q_base + (q_start + row) * d_k + col_chunk);
-    float4* shared_q_vec       = reinterpret_cast<float4*>(s_q + row * 16 + col_chunk);
-    shared_q_vec[0] = global_q_vec[0];
+    // Fused fp32 -> fp16 on the way into shared memory: read 8 floats per
+    // thread (two float4), pack into four __half2, store as 8 halfs.
+    const float4* gq = reinterpret_cast<const float4*>(q_base + (q_start + row) * d_k + col_chunk);
+    float4 fq0 = gq[0];
+    float4 fq1 = gq[1];
+    __half2* sq = reinterpret_cast<__half2*>(s_q + row * 16 + col_chunk);
+    sq[0] = __floats2half2_rn(fq0.x, fq0.y);
+    sq[1] = __floats2half2_rn(fq0.z, fq0.w);
+    sq[2] = __floats2half2_rn(fq1.x, fq1.y);
+    sq[3] = __floats2half2_rn(fq1.z, fq1.w);
 
-
-    const float4* global_k_vec = reinterpret_cast<const float4*>(k_ptr + row * d_k + col_chunk);
-    float4* shared_k_vec       = reinterpret_cast<float4*>(s_k + row * 16 + col_chunk);
-    shared_k_vec[0] = global_k_vec[0];
+    const float4* gk = reinterpret_cast<const float4*>(k_ptr + row * d_k + col_chunk);
+    float4 fk0 = gk[0];
+    float4 fk1 = gk[1];
+    __half2* sk = reinterpret_cast<__half2*>(s_k + row * 16 + col_chunk);
+    sk[0] = __floats2half2_rn(fk0.x, fk0.y);
+    sk[1] = __floats2half2_rn(fk0.z, fk0.w);
+    sk[2] = __floats2half2_rn(fk1.x, fk1.y);
+    sk[3] = __floats2half2_rn(fk1.z, fk1.w);
 
     __syncthreads();
 
@@ -351,12 +362,21 @@ __global__ void sdpa_kernel_mma(
     
     __syncthreads();
 
+    // Fused fp32 -> fp16 V load (transposed into s_v): one float4 pair per
+    // thread; the transpose forces scalar stores into shared.
     int v_row = tid / 2;
     int v_col_chunk = (tid % 2) * 8;
-    for (int i = 0; i < 8; i++) {
-        int col = v_col_chunk + i;
-        s_v[col * 16 + v_row] = v_ptr[v_row * d_v + col]; 
-    }
+    const float4* gv = reinterpret_cast<const float4*>(v_ptr + v_row * d_v + v_col_chunk);
+    float4 fv0 = gv[0];
+    float4 fv1 = gv[1];
+    s_v[(v_col_chunk + 0) * 16 + v_row] = __float2half(fv0.x);
+    s_v[(v_col_chunk + 1) * 16 + v_row] = __float2half(fv0.y);
+    s_v[(v_col_chunk + 2) * 16 + v_row] = __float2half(fv0.z);
+    s_v[(v_col_chunk + 3) * 16 + v_row] = __float2half(fv0.w);
+    s_v[(v_col_chunk + 4) * 16 + v_row] = __float2half(fv1.x);
+    s_v[(v_col_chunk + 5) * 16 + v_row] = __float2half(fv1.y);
+    s_v[(v_col_chunk + 6) * 16 + v_row] = __float2half(fv1.z);
+    s_v[(v_col_chunk + 7) * 16 + v_row] = __float2half(fv1.w);
     
     __syncthreads();
 
@@ -373,15 +393,16 @@ __global__ void sdpa_kernel_mma(
     mma_m16n8k16_fp32_fp16_fp16_fp32(out_acc0, reg_q, reg_v0, out_acc0);
     mma_m16n8k16_fp32_fp16_fp16_fp32(out_acc1, reg_q, reg_v1, out_acc1);
 
-    out_base[r0 * d_v + c0 + 0] = __float2half(out_acc0[0]);
-    out_base[r0 * d_v + c0 + 1] = __float2half(out_acc0[1]);
-    out_base[r1 * d_v + c0 + 0] = __float2half(out_acc0[2]);
-    out_base[r1 * d_v + c0 + 1] = __float2half(out_acc0[3]);
+    // Output is fp32 directly (no fp16 round-trip).
+    out_base[r0 * d_v + c0 + 0] = out_acc0[0];
+    out_base[r0 * d_v + c0 + 1] = out_acc0[1];
+    out_base[r1 * d_v + c0 + 0] = out_acc0[2];
+    out_base[r1 * d_v + c0 + 1] = out_acc0[3];
 
-    out_base[r0 * d_v + c0 + 8 + 0] = __float2half(out_acc1[0]);
-    out_base[r0 * d_v + c0 + 8 + 1] = __float2half(out_acc1[1]);
-    out_base[r1 * d_v + c0 + 8 + 0] = __float2half(out_acc1[2]);
-    out_base[r1 * d_v + c0 + 8 + 1] = __float2half(out_acc1[3]);
+    out_base[r0 * d_v + c0 + 8 + 0] = out_acc1[0];
+    out_base[r0 * d_v + c0 + 8 + 1] = out_acc1[1];
+    out_base[r1 * d_v + c0 + 8 + 0] = out_acc1[2];
+    out_base[r1 * d_v + c0 + 8 + 1] = out_acc1[3];
 }
 
 __global__ void sdpa_kernel_flash(
@@ -810,17 +831,36 @@ void sdpa_optimized_flash_cuda(
 }
 
 
-__global__ void cast_f32_to_f16(const float* in, __half* out, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        out[idx] = __float2half(in[idx]);
+__global__ void cast_f32_to_f16(const float* __restrict__ in, __half* __restrict__ out, int size) {
+    int idx = (blockIdx.x * blockDim.x + threadIdx.x) * 4;
+    if (idx + 3 < size) {
+        float4 v = *reinterpret_cast<const float4*>(in + idx);
+        __half2 lo = __floats2half2_rn(v.x, v.y);
+        __half2 hi = __floats2half2_rn(v.z, v.w);
+        *reinterpret_cast<__half2*>(out + idx)     = lo;
+        *reinterpret_cast<__half2*>(out + idx + 2) = hi;
+    } else {
+        for (int i = 0; idx + i < size; ++i) {
+            out[idx + i] = __float2half(in[idx + i]);
+        }
     }
 }
 
-__global__ void cast_f16_to_f32(const __half* in, float* out, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        out[idx] = __half2float(in[idx]);
+__global__ void cast_f16_to_f32(const __half* __restrict__ in, float* __restrict__ out, int size) {
+    int idx = (blockIdx.x * blockDim.x + threadIdx.x) * 4;
+    if (idx + 3 < size) {
+        __half2 lo = *reinterpret_cast<const __half2*>(in + idx);
+        __half2 hi = *reinterpret_cast<const __half2*>(in + idx + 2);
+        float4 v;
+        v.x = __low2float(lo);
+        v.y = __high2float(lo);
+        v.z = __low2float(hi);
+        v.w = __high2float(hi);
+        *reinterpret_cast<float4*>(out + idx) = v;
+    } else {
+        for (int i = 0; idx + i < size; ++i) {
+            out[idx + i] = __half2float(in[idx + i]);
+        }
     }
 }
 
@@ -837,25 +877,8 @@ void sdpa_mma_cuda(
     int64_t d_k,
     int64_t d_v
 ) {
-    int64_t q_size = batch_size * num_heads * seq_len_q * d_k;
-    int64_t k_size = batch_size * num_heads * seq_len_k * d_k;
-    int64_t v_size = batch_size * num_heads * seq_len_k * d_v;
-    int64_t out_size = batch_size * num_heads * seq_len_q * d_v;
-
-    __half *d_Q_half, *d_K_half, *d_V_half, *d_out_half;
-    cudaMalloc(&d_Q_half, q_size * sizeof(__half));
-    cudaMalloc(&d_K_half, k_size * sizeof(__half));
-    cudaMalloc(&d_V_half, v_size * sizeof(__half));
-    cudaMalloc(&d_out_half, out_size * sizeof(__half));
-
-    int threads = 256;
-    cast_f32_to_f16<<<CEIL_DIV(q_size, threads), threads>>>(Q, d_Q_half, q_size);
-    cast_f32_to_f16<<<CEIL_DIV(k_size, threads), threads>>>(K, d_K_half, k_size);
-    cast_f32_to_f16<<<CEIL_DIV(v_size, threads), threads>>>(V, d_V_half, v_size);
-
     float scale = 1.0f / sqrtf(static_cast<float>(d_k));
 
-    // Our kernel currently assumes sequence multiples of 16 and exact dims 16x16 for the warp.
     dim3 block(32);
     dim3 grid(
         1,
@@ -863,21 +886,12 @@ void sdpa_mma_cuda(
         batch_size * num_heads
     );
 
-    // SMEM = sizeof(__half) * (Q_tile + K_tile + V_tile + scores)
-    // 256 + 256 + 256 + 512 (float scores) = 1536 bytes
     size_t smem_size = (16 * 16 * 3) * sizeof(__half) + (16 * 16) * sizeof(float);
 
     sdpa_kernel_mma<<<grid, block, smem_size>>>(
-        d_Q_half, d_K_half, d_V_half, mask, d_out_half,
+        Q, K, V, mask, out,
         batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v, scale
     );
-
-    cast_f16_to_f32<<<CEIL_DIV(out_size, threads), threads>>>(d_out_half, out, out_size);
-
-    CUDA_CHECK(cudaFree(d_Q_half));
-    CUDA_CHECK(cudaFree(d_K_half));
-    CUDA_CHECK(cudaFree(d_V_half));
-    CUDA_CHECK(cudaFree(d_out_half));
 
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
