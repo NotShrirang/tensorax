@@ -72,6 +72,26 @@ __device__ __forceinline__ void ldmatrix_m16n8_x2_b16(uint32_t regs[2], const vo
     );
 }
 
+// cp.async helpers (sm_80+). Stages 16 bytes (one float4 / eight halves) per
+// thread directly from global to shared memory, bypassing the register file.
+__device__ __forceinline__ void cp_async_16B(void* smem_ptr, const void* gmem_ptr) {
+    uint32_t smem_addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+    asm volatile(
+        "cp.async.cg.shared.global [%0], [%1], 16;\n"
+        :: "r"(smem_addr), "l"(gmem_ptr)
+    );
+}
+__device__ __forceinline__ void cp_async_commit() {
+    asm volatile("cp.async.commit_group;\n" ::);
+}
+template <int N>
+__device__ __forceinline__ void cp_async_wait_group() {
+    asm volatile("cp.async.wait_group %0;\n" :: "n"(N));
+}
+__device__ __forceinline__ void cp_async_wait_all() {
+    asm volatile("cp.async.wait_all;\n" ::);
+}
+
 __device__ __forceinline__ void mma_m16n8k16_fp32_fp16_fp16_fp32(
     float d[4], const uint32_t a[4], const uint32_t b[2], const float c[4]) {
     asm volatile(
@@ -292,15 +312,22 @@ __global__ void sdpa_kernel_mma(
     const float* v_ptr  = V + qkv_base * seq_len_k * d_v;
     float* out_base     = out + qkv_base * seq_len_q * d_v;
 
+    // Smem layout. K and V no longer have full per-tile fp16 buffers; instead
+    // they are streamed via cp.async into double-buffered chunk staging slots
+    // (16x16 fp32) and then cast on the fly into double-buffered fp16 chunk
+    // buffers that the MMA reads via ldmatrix.
     extern __shared__ __half mma_smem[];
-    __half* s_q     = mma_smem;
-    __half* s_k     = s_q + 16 * d_k;
-    __half* s_v     = s_k + 16 * d_k;
-    float*  s_scores = reinterpret_cast<float*>(s_v + 16 * d_v);
-    float*  s_o     = s_scores + 16 * 16;
-    float*  s_m     = s_o + 16 * d_v;
-    float*  s_l     = s_m + 16;
-    float*  s_corr  = s_l + 16;
+    __half* s_q          = mma_smem;                                       // 16 * d_k halves (loaded once)
+    __half* s_p          = s_q + 16 * d_k;                                  // 16x16 halves (P fp16 after softmax)
+    float*  s_kstage_f32 = reinterpret_cast<float*>(s_p + 16 * 16);         // [2][16][16] fp32 cp.async staging
+    __half* s_kchunk     = reinterpret_cast<__half*>(s_kstage_f32 + 2 * 16 * 16); // [2][16][16] fp16 (post-cast K chunk)
+    float*  s_vstage_f32 = reinterpret_cast<float*>(s_kchunk + 2 * 16 * 16);     // [2][16][16] fp32 cp.async staging
+    __half* s_vchunk     = reinterpret_cast<__half*>(s_vstage_f32 + 2 * 16 * 16);// [2][16][16] fp16 col-major (post-cast V chunk)
+    float*  s_scores     = reinterpret_cast<float*>(s_vchunk + 2 * 16 * 16);     // 16x16 fp32
+    float*  s_o          = s_scores + 16 * 16;                              // 16 * d_v fp32 (output accumulator)
+    float*  s_m          = s_o + 16 * d_v;                                  // 16 fp32 (running max)
+    float*  s_l          = s_m + 16;                                         // 16 fp32 (running sum)
+    float*  s_corr       = s_l + 16;                                         // 16 fp32 (per-tile correction)
 
     int r0 = tid / 4;
     int r1 = r0 + 8;
@@ -313,24 +340,15 @@ __global__ void sdpa_kernel_mma(
     int b_khalf = ((tid >> 3) & 1) * 8;
 
 #ifdef TENSORAX_PROFILE
-    // Cumulative-per-section timing (block 0,0,0 thread 0 only). Pre/post-loop sections
-    // are measured once. In-loop sections accumulate across all KV iterations.
     bool log = (prof_buf != nullptr &&
                 threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0 &&
                 blockIdx.x  == 0 && blockIdx.y  == 0 && blockIdx.z  == 0);
     long long t_entry      = log ? clock64() : 0;
     long long t_setup_end  = 0, t_qload_end = 0, t_loop_end = 0;
-    long long sec_kvload   = 0;  // load + cast K, V
-    long long sec_qkt      = 0;  // Q @ K^T MMA accumulation
-    long long sec_softmax  = 0;  // score scale + write + online softmax
-    long long sec_pcast    = 0;  // cast P to fp16 + rescale O accumulator
-    long long sec_pv       = 0;  // P @ V MMA across d_v chunks
-#endif
-
-#ifdef TENSORAX_PROFILE
     if (log) t_setup_end = clock64();
 #endif
 
+    // ---- Load Q (cast fp32 -> fp16) into s_q ----
     int total_q4 = (16 * d_k) / 4;
     for (int i = tid; i < total_q4; i += 32) {
         int idx = i * 4;
@@ -354,62 +372,92 @@ __global__ void sdpa_kernel_mma(
     int dk_chunks = d_k / 16;
     int dv_chunks = d_v / 16;
 
+    // Each thread loads exactly 2 float4's per 16x16 chunk (256 elements / 32 threads = 8 each = 2 float4).
+    // Issue patterns: thread t -> rows (t/2), cols ((t%2)*8 .. (t%2)*8 + 7), as two 16-byte cp.async copies.
+    auto issue_k_chunk = [&] (int kv_start, int dk, int buf) {
+        int row = tid / 2;
+        int col = (tid % 2) * 8;
+        float* dst0 = s_kstage_f32 + buf * 256 + row * 16 + col;
+        float* dst1 = dst0 + 4;
+        const float* src0 = k_ptr + (kv_start + row) * d_k + dk + col;
+        const float* src1 = src0 + 4;
+        cp_async_16B(dst0, src0);
+        cp_async_16B(dst1, src1);
+    };
+    auto issue_v_chunk = [&] (int kv_start, int dv, int buf) {
+        int k = tid / 2;
+        int n = (tid % 2) * 8;
+        float* dst0 = s_vstage_f32 + buf * 256 + k * 16 + n;
+        float* dst1 = dst0 + 4;
+        const float* src0 = v_ptr + (kv_start + k) * d_v + dv + n;
+        const float* src1 = src0 + 4;
+        cp_async_16B(dst0, src0);
+        cp_async_16B(dst1, src1);
+    };
+    // Cast a 16x16 fp32 staging chunk into fp16 (row-major).
+    auto cast_k_chunk = [&] (int buf) {
+        // 256 halves / 32 threads = 8 each, packed as 4 __half2.
+        int base = tid * 8;
+        const float* src = s_kstage_f32 + buf * 256 + base;
+        __half2* dst = reinterpret_cast<__half2*>(s_kchunk + buf * 256 + base);
+        dst[0] = __floats2half2_rn(src[0], src[1]);
+        dst[1] = __floats2half2_rn(src[2], src[3]);
+        dst[2] = __floats2half2_rn(src[4], src[5]);
+        dst[3] = __floats2half2_rn(src[6], src[7]);
+    };
+    // Cast a 16x16 fp32 staging chunk into fp16 col-major (transpose during cast).
+    auto cast_v_chunk = [&] (int buf) {
+        // Each thread handles 8 (k, n) cells: row = tid/2 (k), n in (tid%2)*8 .. +7.
+        int k = tid / 2;
+        int n0 = (tid % 2) * 8;
+        const float* src = s_vstage_f32 + buf * 256 + k * 16 + n0;
+        __half* dst = s_vchunk + buf * 256;
+        #pragma unroll
+        for (int i = 0; i < 8; i++) {
+            dst[(n0 + i) * 16 + k] = __float2half(src[i]);
+        }
+    };
+
     for (int kv_start = 0; kv_start < seq_len_k; kv_start += 16) {
-#ifdef TENSORAX_PROFILE
-        long long t0 = log ? clock64() : 0;
-#endif
-        int total_k4 = (16 * d_k) / 4;
-        for (int i = tid; i < total_k4; i += 32) {
-            int idx = i * 4;
-            int row = idx / d_k;
-            int col = idx % d_k;
-            float4 v = *reinterpret_cast<const float4*>(k_ptr + (kv_start + row) * d_k + col);
-            __half2* s = reinterpret_cast<__half2*>(s_k + row * d_k + col);
-            s[0] = __floats2half2_rn(v.x, v.y);
-            s[1] = __floats2half2_rn(v.z, v.w);
-        }
-        int total_v8 = (16 * d_v) / 8;
-        for (int i = tid; i < total_v8; i += 32) {
-            int cell_base = i * 8;
-            int k = cell_base / d_v;
-            int n = cell_base % d_v;
-            float4 v0 = *reinterpret_cast<const float4*>(v_ptr + (kv_start + k) * d_v + n);
-            float4 v1 = *reinterpret_cast<const float4*>(v_ptr + (kv_start + k) * d_v + n + 4);
-            s_v[(n + 0) * 16 + k] = __float2half(v0.x);
-            s_v[(n + 1) * 16 + k] = __float2half(v0.y);
-            s_v[(n + 2) * 16 + k] = __float2half(v0.z);
-            s_v[(n + 3) * 16 + k] = __float2half(v0.w);
-            s_v[(n + 4) * 16 + k] = __float2half(v1.x);
-            s_v[(n + 5) * 16 + k] = __float2half(v1.y);
-            s_v[(n + 6) * 16 + k] = __float2half(v1.z);
-            s_v[(n + 7) * 16 + k] = __float2half(v1.w);
-        }
-        __syncthreads();
-
-#ifdef TENSORAX_PROFILE
-        long long t1 = log ? clock64() : 0;
-        if (log) sec_kvload += t1 - t0;
-#endif
-
+        // ===================== Phase 1: Q @ K^T =====================
+        // Pipeline K chunk loads with QKT MMAs along the d_k axis.
+        // Issue chunk 0 cp.async, then for chunk i: issue chunk i+1 (if any),
+        // wait for chunk i, cast, ldmatrix + MMA. Cast/MMA of chunk i runs
+        // while chunk i+1's cp.async streams in.
         float acc0[4] = {0.0f, 0.0f, 0.0f, 0.0f};
         float acc1[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+        issue_k_chunk(kv_start, 0, 0);
+        cp_async_commit();
+
         for (int dk_chunk = 0; dk_chunk < dk_chunks; dk_chunk++) {
             int dk = dk_chunk * 16;
+            int cur_buf = dk_chunk & 1;
+
+            if (dk_chunk + 1 < dk_chunks) {
+                int next_buf = (dk_chunk + 1) & 1;
+                issue_k_chunk(kv_start, dk + 16, next_buf);
+                cp_async_commit();
+                cp_async_wait_group<1>();
+            } else {
+                cp_async_wait_all();
+            }
+            __syncthreads();
+
+            cast_k_chunk(cur_buf);
+            __syncthreads();
+
             uint32_t reg_q[4];
             uint32_t reg_k0[2];
             uint32_t reg_k1[2];
             ldmatrix_m16n8_x4_b16(reg_q,  s_q + smem_row_a * d_k + dk + smem_col_a);
-            ldmatrix_m16n8_x2_b16(reg_k0, s_k +  b_col      * d_k + dk + b_khalf);
-            ldmatrix_m16n8_x2_b16(reg_k1, s_k + (b_col + 8) * d_k + dk + b_khalf);
+            ldmatrix_m16n8_x2_b16(reg_k0, s_kchunk + cur_buf * 256 +  b_col      * 16 + b_khalf);
+            ldmatrix_m16n8_x2_b16(reg_k1, s_kchunk + cur_buf * 256 + (b_col + 8) * 16 + b_khalf);
             mma_m16n8k16_fp32_fp16_fp16_fp32(acc0, reg_q, reg_k0, acc0);
             mma_m16n8k16_fp32_fp16_fp16_fp32(acc1, reg_q, reg_k1, acc1);
         }
 
-#ifdef TENSORAX_PROFILE
-        long long t2 = log ? clock64() : 0;
-        if (log) sec_qkt += t2 - t1;
-#endif
-
+        // Score scale and write
         s_scores[r0 * 16 + c0]         = acc0[0] * scale;
         s_scores[r0 * 16 + c0 + 1]     = acc0[1] * scale;
         s_scores[r1 * 16 + c0]         = acc0[2] * scale;
@@ -420,6 +468,7 @@ __global__ void sdpa_kernel_mma(
         s_scores[r1 * 16 + c0 + 8 + 1] = acc1[3] * scale;
         __syncthreads();
 
+        // ===================== Online softmax =====================
         if (tid < 16) {
             float old_max = s_m[tid];
             float tile_max = -FLT_MAX;
@@ -440,15 +489,11 @@ __global__ void sdpa_kernel_mma(
         }
         __syncthreads();
 
-#ifdef TENSORAX_PROFILE
-        long long t3 = log ? clock64() : 0;
-        if (log) sec_softmax += t3 - t2;
-#endif
-
+        // Cast P -> fp16 in s_p, rescale s_o by per-row corr
         for (int i = tid; i < 256 / 2; i += 32) {
             int idx = i * 2;
-            __half2 v = __floats2half2_rn(s_scores[idx], s_scores[idx + 1]);
-            *reinterpret_cast<__half2*>(s_k + idx) = v;
+            *reinterpret_cast<__half2*>(s_p + idx) =
+                __floats2half2_rn(s_scores[idx], s_scores[idx + 1]);
         }
         for (int i = tid; i < 16 * d_v; i += 32) {
             int row = i / d_v;
@@ -456,19 +501,34 @@ __global__ void sdpa_kernel_mma(
         }
         __syncthreads();
 
-#ifdef TENSORAX_PROFILE
-        long long t4 = log ? clock64() : 0;
-        if (log) sec_pcast += t4 - t3;
-#endif
+        // ===================== Phase 2: P @ V =====================
+        // Same pipelining pattern but along d_v.
+        issue_v_chunk(kv_start, 0, 0);
+        cp_async_commit();
 
         for (int dv_chunk = 0; dv_chunk < dv_chunks; dv_chunk++) {
             int dv = dv_chunk * 16;
+            int cur_buf = dv_chunk & 1;
+
+            if (dv_chunk + 1 < dv_chunks) {
+                int next_buf = (dv_chunk + 1) & 1;
+                issue_v_chunk(kv_start, dv + 16, next_buf);
+                cp_async_commit();
+                cp_async_wait_group<1>();
+            } else {
+                cp_async_wait_all();
+            }
+            __syncthreads();
+
+            cast_v_chunk(cur_buf);
+            __syncthreads();
+
             uint32_t reg_p[4];
             uint32_t reg_v0[2];
             uint32_t reg_v1[2];
-            ldmatrix_m16n8_x4_b16(reg_p,  s_k + smem_row_a * 16 + smem_col_a);
-            ldmatrix_m16n8_x2_b16(reg_v0, s_v + (dv + b_col)     * 16 + b_khalf);
-            ldmatrix_m16n8_x2_b16(reg_v1, s_v + (dv + b_col + 8) * 16 + b_khalf);
+            ldmatrix_m16n8_x4_b16(reg_p,  s_p + smem_row_a * 16 + smem_col_a);
+            ldmatrix_m16n8_x2_b16(reg_v0, s_vchunk + cur_buf * 256 +  b_col      * 16 + b_khalf);
+            ldmatrix_m16n8_x2_b16(reg_v1, s_vchunk + cur_buf * 256 + (b_col + 8) * 16 + b_khalf);
 
             float oacc0[4] = {0.0f, 0.0f, 0.0f, 0.0f};
             float oacc1[4] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -485,11 +545,6 @@ __global__ void sdpa_kernel_mma(
             s_o[r1 * d_v + dv + c0 + 8 + 1] += oacc1[3];
         }
         __syncthreads();
-
-#ifdef TENSORAX_PROFILE
-        long long t5 = log ? clock64() : 0;
-        if (log) sec_pv += t5 - t4;
-#endif
     }
 
 #ifdef TENSORAX_PROFILE
@@ -510,18 +565,17 @@ __global__ void sdpa_kernel_mma(
     if (log) {
         long long t_end = clock64();
         // Cumulative tick layout (consumer diffs to recover per-section time):
-        //   [0]=0; [1]=Setup; [2]=+Load Q+init; [3]=+Load K,V (cum);
-        //   [4]=+Q@K^T (cum); [5]=+Softmax (cum); [6]=+Cast P + rescale O (cum);
-        //   [7]=+P@V (cum); [8]=+Final normalize and write
+        //   [0]=0; [1]=Setup; [2]=+Load Q+init; [3]=+Q@K^T+K cp.async (cum);
+        //   [4]=+Softmax (cum); [5]=+Cast P + rescale O (cum); [6]=+P@V+V cp.async (cum);
+        //   [7]=+Final normalize + write
+        // sec_qkt / softmax / pcast / pv are zero in this version since per-iter timing
+        // would interfere with cp.async pipelining. The single "loop total" tick captures
+        // them collectively.
         prof_buf[0] = 0;
         prof_buf[1] = t_setup_end - t_entry;
         prof_buf[2] = prof_buf[1] + (t_qload_end - t_setup_end);
-        prof_buf[3] = prof_buf[2] + sec_kvload;
-        prof_buf[4] = prof_buf[3] + sec_qkt;
-        prof_buf[5] = prof_buf[4] + sec_softmax;
-        prof_buf[6] = prof_buf[5] + sec_pcast;
-        prof_buf[7] = prof_buf[6] + sec_pv;
-        prof_buf[8] = prof_buf[7] + (t_end - t_loop_end);
+        prof_buf[3] = prof_buf[2] + (t_loop_end - t_qload_end);     // entire KV loop
+        prof_buf[4] = prof_buf[3] + (t_end - t_loop_end);           // final write
     }
 #endif
 }
@@ -1045,10 +1099,21 @@ __global__ void cast_f16_to_f32(const __half* __restrict__ in, float* __restrict
 }
 
 static size_t mma_smem_bytes(int64_t d_k, int64_t d_v) {
-    // s_q + s_k (each 16 * d_k halves) + s_v (16 * d_v halves) +
-    // s_scores (16x16 fp32) + s_o (16 * d_v fp32) + s_m + s_l + s_corr (3 * 16 fp32)
-    return (size_t)16 * (size_t)d_k * sizeof(__half) * 2
-         + (size_t)16 * (size_t)d_v * sizeof(__half)
+    // s_q (16 * d_k halves, full)
+    // + s_p (16x16 halves, P fp16)
+    // + s_kstage (2 * 16x16 fp32, cp.async staging)
+    // + s_kchunk (2 * 16x16 halves, post-cast K chunk)
+    // + s_vstage (2 * 16x16 fp32)
+    // + s_vchunk (2 * 16x16 halves, col-major)
+    // + s_scores (16x16 fp32)
+    // + s_o (16 * d_v fp32, output accumulator)
+    // + s_m, s_l, s_corr (3 * 16 fp32)
+    return (size_t)16 * (size_t)d_k * sizeof(__half)
+         + (size_t)16 * 16 * sizeof(__half)
+         + (size_t)2 * 16 * 16 * sizeof(float)
+         + (size_t)2 * 16 * 16 * sizeof(__half)
+         + (size_t)2 * 16 * 16 * sizeof(float)
+         + (size_t)2 * 16 * 16 * sizeof(__half)
          + (size_t)16 * 16 * sizeof(float)
          + (size_t)16 * (size_t)d_v * sizeof(float)
          + (size_t)3 * 16 * sizeof(float);
