@@ -13,7 +13,7 @@ print("PyTorch version:", torch.__version__)
 print("PyTorch CUDA available:", torch.cuda.is_available())
 print()
 
-times = 30
+times = 5
 
 batch, heads, seq_len, d_k, d_v = 4, 8, 256, 512, 512
 

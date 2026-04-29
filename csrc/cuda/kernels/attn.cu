@@ -284,151 +284,184 @@ __global__ void sdpa_kernel_mma(
     int b = blockIdx.z / num_heads;
     int h = blockIdx.z % num_heads;
     int q_start = blockIdx.y * 16;
-
     if (b >= batch_size || h >= num_heads || q_start >= seq_len_q) return;
 
     int tid = threadIdx.x;
     int qkv_base = b * num_heads + h;
-
     const float* q_base = Q + qkv_base * seq_len_q * d_k;
     const float* k_ptr  = K + qkv_base * seq_len_k * d_k;
     const float* v_ptr  = V + qkv_base * seq_len_k * d_v;
     float* out_base     = out + qkv_base * seq_len_q * d_v;
 
     extern __shared__ __half mma_smem[];
-    __half* s_q = mma_smem;
-    __half* s_k = s_q + 16 * 16;
-    __half* s_v = s_k + 16 * 16;
-    float* s_scores = reinterpret_cast<float*>(s_v + 16 * 16);
-
-    int row = tid / 2;
-    int col_chunk = (tid % 2) * 8;
-    TX_TICK(prof_buf, 1);
-
-    const float4* gq = reinterpret_cast<const float4*>(q_base + (q_start + row) * d_k + col_chunk);
-    float4 fq0 = gq[0];
-    float4 fq1 = gq[1];
-    TX_TICK(prof_buf, 2);
-
-    __half2* sq = reinterpret_cast<__half2*>(s_q + row * 16 + col_chunk);
-    sq[0] = __floats2half2_rn(fq0.x, fq0.y);
-    sq[1] = __floats2half2_rn(fq0.z, fq0.w);
-    sq[2] = __floats2half2_rn(fq1.x, fq1.y);
-    sq[3] = __floats2half2_rn(fq1.z, fq1.w);
-    TX_TICK(prof_buf, 3);
-
-    const float4* gk = reinterpret_cast<const float4*>(k_ptr + row * d_k + col_chunk);
-    float4 fk0 = gk[0];
-    float4 fk1 = gk[1];
-    TX_TICK(prof_buf, 4);
-
-    __half2* sk = reinterpret_cast<__half2*>(s_k + row * 16 + col_chunk);
-    sk[0] = __floats2half2_rn(fk0.x, fk0.y);
-    sk[1] = __floats2half2_rn(fk0.z, fk0.w);
-    sk[2] = __floats2half2_rn(fk1.x, fk1.y);
-    sk[3] = __floats2half2_rn(fk1.z, fk1.w);
-    __syncthreads();
-    TX_TICK(prof_buf, 5);
-
-    uint32_t reg_q[4];
-    uint32_t reg_k0[2];
-    uint32_t reg_k1[2];
-
-    float acc0[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    float acc1[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-
-    int smem_row = tid % 16;
-    int smem_col = (tid / 16) * 8;
-
-    ldmatrix_m16n8_x4_b16(reg_q, s_q + smem_row * 16 + smem_col);
-    ldmatrix_m16n8_x2_b16(reg_k0, s_k + smem_row * 16 + 0);
-    ldmatrix_m16n8_x2_b16(reg_k1, s_k + smem_row * 16 + 8);
-    TX_TICK(prof_buf, 6);
-
-    mma_m16n8k16_fp32_fp16_fp16_fp32(acc0, reg_q, reg_k0, acc0);
-    mma_m16n8k16_fp32_fp16_fp16_fp32(acc1, reg_q, reg_k1, acc1);
-    TX_TICK(prof_buf, 7);
+    __half* s_q     = mma_smem;
+    __half* s_k     = s_q + 16 * d_k;
+    __half* s_v     = s_k + 16 * d_k;
+    float*  s_scores = reinterpret_cast<float*>(s_v + 16 * d_v);
+    float*  s_o     = s_scores + 16 * 16;
+    float*  s_m     = s_o + 16 * d_v;
+    float*  s_l     = s_m + 16;
+    float*  s_corr  = s_l + 16;
 
     int r0 = tid / 4;
-    int r1 = tid / 4 + 8;
+    int r1 = r0 + 8;
     int c0 = (tid % 4) * 2;
 
-    s_scores[r0 * 16 + c0 + 0] = acc0[0];
-    s_scores[r0 * 16 + c0 + 1] = acc0[1];
-    s_scores[r1 * 16 + c0 + 0] = acc0[2];
-    s_scores[r1 * 16 + c0 + 1] = acc0[3];
+    int smem_row_a = tid % 16;
+    int smem_col_a = (tid / 16) * 8;
 
-    s_scores[r0 * 16 + c0 + 8 + 0] = acc1[0];
-    s_scores[r0 * 16 + c0 + 8 + 1] = acc1[1];
-    s_scores[r1 * 16 + c0 + 8 + 0] = acc1[2];
-    s_scores[r1 * 16 + c0 + 8 + 1] = acc1[3];
+    int b_col   = tid & 7;
+    int b_khalf = ((tid >> 3) & 1) * 8;
+    TX_TICK(prof_buf, 1);
+
+    int total_q4 = (16 * d_k) / 4;
+    for (int i = tid; i < total_q4; i += 32) {
+        int idx = i * 4;
+        int row = idx / d_k;
+        int col = idx % d_k;
+        float4 v = *reinterpret_cast<const float4*>(q_base + (q_start + row) * d_k + col);
+        __half2* s = reinterpret_cast<__half2*>(s_q + row * d_k + col);
+        s[0] = __floats2half2_rn(v.x, v.y);
+        s[1] = __floats2half2_rn(v.z, v.w);
+    }
+
+    int total_o = 16 * d_v;
+    for (int i = tid; i < total_o; i += 32) s_o[i] = 0.0f;
+    if (tid < 16) { s_m[tid] = -FLT_MAX; s_l[tid] = 0.0f; }
     __syncthreads();
+    TX_TICK(prof_buf, 2);
+
+    int dk_chunks = d_k / 16;
+    int dv_chunks = d_v / 16;
+
+    bool first_kv = true;
+    for (int kv_start = 0; kv_start < seq_len_k; kv_start += 16) {
+        int total_k4 = (16 * d_k) / 4;
+        for (int i = tid; i < total_k4; i += 32) {
+            int idx = i * 4;
+            int row = idx / d_k;
+            int col = idx % d_k;
+            float4 v = *reinterpret_cast<const float4*>(k_ptr + (kv_start + row) * d_k + col);
+            __half2* s = reinterpret_cast<__half2*>(s_k + row * d_k + col);
+            s[0] = __floats2half2_rn(v.x, v.y);
+            s[1] = __floats2half2_rn(v.z, v.w);
+        }
+        int total_v8 = (16 * d_v) / 8;
+        for (int i = tid; i < total_v8; i += 32) {
+            int cell_base = i * 8;
+            int k = cell_base / d_v;
+            int n = cell_base % d_v;
+            float4 v0 = *reinterpret_cast<const float4*>(v_ptr + (kv_start + k) * d_v + n);
+            float4 v1 = *reinterpret_cast<const float4*>(v_ptr + (kv_start + k) * d_v + n + 4);
+            s_v[(n + 0) * 16 + k] = __float2half(v0.x);
+            s_v[(n + 1) * 16 + k] = __float2half(v0.y);
+            s_v[(n + 2) * 16 + k] = __float2half(v0.z);
+            s_v[(n + 3) * 16 + k] = __float2half(v0.w);
+            s_v[(n + 4) * 16 + k] = __float2half(v1.x);
+            s_v[(n + 5) * 16 + k] = __float2half(v1.y);
+            s_v[(n + 6) * 16 + k] = __float2half(v1.z);
+            s_v[(n + 7) * 16 + k] = __float2half(v1.w);
+        }
+        __syncthreads();
+        if (first_kv) TX_TICK(prof_buf, 3);
+
+        float acc0[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        float acc1[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        for (int dk_chunk = 0; dk_chunk < dk_chunks; dk_chunk++) {
+            int dk = dk_chunk * 16;
+            uint32_t reg_q[4];
+            uint32_t reg_k0[2];
+            uint32_t reg_k1[2];
+            ldmatrix_m16n8_x4_b16(reg_q,  s_q + smem_row_a * d_k + dk + smem_col_a);
+            ldmatrix_m16n8_x2_b16(reg_k0, s_k +  b_col      * d_k + dk + b_khalf);
+            ldmatrix_m16n8_x2_b16(reg_k1, s_k + (b_col + 8) * d_k + dk + b_khalf);
+            mma_m16n8k16_fp32_fp16_fp16_fp32(acc0, reg_q, reg_k0, acc0);
+            mma_m16n8k16_fp32_fp16_fp16_fp32(acc1, reg_q, reg_k1, acc1);
+        }
+        if (first_kv) TX_TICK(prof_buf, 4);
+
+        s_scores[r0 * 16 + c0]         = acc0[0] * scale;
+        s_scores[r0 * 16 + c0 + 1]     = acc0[1] * scale;
+        s_scores[r1 * 16 + c0]         = acc0[2] * scale;
+        s_scores[r1 * 16 + c0 + 1]     = acc0[3] * scale;
+        s_scores[r0 * 16 + c0 + 8]     = acc1[0] * scale;
+        s_scores[r0 * 16 + c0 + 8 + 1] = acc1[1] * scale;
+        s_scores[r1 * 16 + c0 + 8]     = acc1[2] * scale;
+        s_scores[r1 * 16 + c0 + 8 + 1] = acc1[3] * scale;
+        __syncthreads();
+
+        if (tid < 16) {
+            float old_max = s_m[tid];
+            float tile_max = -FLT_MAX;
+            for (int j = 0; j < 16; j++) {
+                tile_max = fmaxf(tile_max, s_scores[tid * 16 + j]);
+            }
+            float new_max = fmaxf(old_max, tile_max);
+            float corr = exp_approx(old_max - new_max);
+            float tile_sum = 0.0f;
+            for (int j = 0; j < 16; j++) {
+                float p = exp_approx(s_scores[tid * 16 + j] - new_max);
+                s_scores[tid * 16 + j] = p;
+                tile_sum += p;
+            }
+            s_m[tid]    = new_max;
+            s_l[tid]    = s_l[tid] * corr + tile_sum;
+            s_corr[tid] = corr;
+        }
+        __syncthreads();
+        if (first_kv) TX_TICK(prof_buf, 5);
+
+        for (int i = tid; i < 256 / 2; i += 32) {
+            int idx = i * 2;
+            __half2 v = __floats2half2_rn(s_scores[idx], s_scores[idx + 1]);
+            *reinterpret_cast<__half2*>(s_k + idx) = v;
+        }
+        for (int i = tid; i < 16 * d_v; i += 32) {
+            int row = i / d_v;
+            s_o[i] *= s_corr[row];
+        }
+        __syncthreads();
+        if (first_kv) TX_TICK(prof_buf, 6);
+
+        for (int dv_chunk = 0; dv_chunk < dv_chunks; dv_chunk++) {
+            int dv = dv_chunk * 16;
+            uint32_t reg_p[4];
+            uint32_t reg_v0[2];
+            uint32_t reg_v1[2];
+            ldmatrix_m16n8_x4_b16(reg_p,  s_k + smem_row_a * 16 + smem_col_a);
+            ldmatrix_m16n8_x2_b16(reg_v0, s_v + (dv + b_col)     * 16 + b_khalf);
+            ldmatrix_m16n8_x2_b16(reg_v1, s_v + (dv + b_col + 8) * 16 + b_khalf);
+
+            float oacc0[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            float oacc1[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            mma_m16n8k16_fp32_fp16_fp16_fp32(oacc0, reg_p, reg_v0, oacc0);
+            mma_m16n8k16_fp32_fp16_fp16_fp32(oacc1, reg_p, reg_v1, oacc1);
+
+            s_o[r0 * d_v + dv + c0]         += oacc0[0];
+            s_o[r0 * d_v + dv + c0 + 1]     += oacc0[1];
+            s_o[r1 * d_v + dv + c0]         += oacc0[2];
+            s_o[r1 * d_v + dv + c0 + 1]     += oacc0[3];
+            s_o[r0 * d_v + dv + c0 + 8]     += oacc1[0];
+            s_o[r0 * d_v + dv + c0 + 8 + 1] += oacc1[1];
+            s_o[r1 * d_v + dv + c0 + 8]     += oacc1[2];
+            s_o[r1 * d_v + dv + c0 + 8 + 1] += oacc1[3];
+        }
+        __syncthreads();
+        if (first_kv) TX_TICK(prof_buf, 7);
+        first_kv = false;
+    }
     TX_TICK(prof_buf, 8);
 
     if (tid < 16) {
-        float row_max = -FLT_MAX;
-        for (int i = 0; i < 16; i++) {
-            s_scores[tid * 16 + i] *= scale;
-            row_max = fmaxf(row_max, s_scores[tid * 16 + i]);
-        }
-        TX_TICK(prof_buf, 9);
-
-        float row_sum = 0.0f;
-        for (int i = 0; i < 16; i++) {
-            float e = exp_approx(s_scores[tid * 16 + i] - row_max);
-            s_scores[tid * 16 + i] = e;
-            row_sum += e;
-        }
-        TX_TICK(prof_buf, 10);
-
-        for (int i = 0; i < 16; i++) {
-            s_k[tid * 16 + i] = __float2half(s_scores[tid * 16 + i] / row_sum);
+        int qrow = q_start + tid;
+        if (qrow < seq_len_q) {
+            float inv_l = 1.0f / s_l[tid];
+            for (int d = 0; d < d_v; d++) {
+                out_base[qrow * d_v + d] = s_o[tid * d_v + d] * inv_l;
+            }
         }
     }
-    __syncthreads();
-    TX_TICK(prof_buf, 11);
-
-    int v_row = tid / 2;
-    int v_col_chunk = (tid % 2) * 8;
-    const float4* gv = reinterpret_cast<const float4*>(v_ptr + v_row * d_v + v_col_chunk);
-    float4 fv0 = gv[0];
-    float4 fv1 = gv[1];
-    TX_TICK(prof_buf, 12);
-
-    s_v[(v_col_chunk + 0) * 16 + v_row] = __float2half(fv0.x);
-    s_v[(v_col_chunk + 1) * 16 + v_row] = __float2half(fv0.y);
-    s_v[(v_col_chunk + 2) * 16 + v_row] = __float2half(fv0.z);
-    s_v[(v_col_chunk + 3) * 16 + v_row] = __float2half(fv0.w);
-    s_v[(v_col_chunk + 4) * 16 + v_row] = __float2half(fv1.x);
-    s_v[(v_col_chunk + 5) * 16 + v_row] = __float2half(fv1.y);
-    s_v[(v_col_chunk + 6) * 16 + v_row] = __float2half(fv1.z);
-    s_v[(v_col_chunk + 7) * 16 + v_row] = __float2half(fv1.w);
-    __syncthreads();
-    TX_TICK(prof_buf, 13);
-
-    ldmatrix_m16n8_x4_b16(reg_q, s_k + smem_row * 16 + smem_col);
-    uint32_t reg_v0[2];
-    uint32_t reg_v1[2];
-    ldmatrix_m16n8_x2_b16(reg_v0, s_v + smem_row * 16 + 0);
-    ldmatrix_m16n8_x2_b16(reg_v1, s_v + smem_row * 16 + 8);
-    TX_TICK(prof_buf, 14);
-
-    float out_acc0[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    float out_acc1[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    mma_m16n8k16_fp32_fp16_fp16_fp32(out_acc0, reg_q, reg_v0, out_acc0);
-    mma_m16n8k16_fp32_fp16_fp16_fp32(out_acc1, reg_q, reg_v1, out_acc1);
-    TX_TICK(prof_buf, 15);
-
-    out_base[r0 * d_v + c0 + 0] = out_acc0[0];
-    out_base[r0 * d_v + c0 + 1] = out_acc0[1];
-    out_base[r1 * d_v + c0 + 0] = out_acc0[2];
-    out_base[r1 * d_v + c0 + 1] = out_acc0[3];
-
-    out_base[r0 * d_v + c0 + 8 + 0] = out_acc1[0];
-    out_base[r0 * d_v + c0 + 8 + 1] = out_acc1[1];
-    out_base[r1 * d_v + c0 + 8 + 0] = out_acc1[2];
-    out_base[r1 * d_v + c0 + 8 + 1] = out_acc1[3];
-    TX_TICK(prof_buf, 16);
+    TX_TICK(prof_buf, 9);
 }
 
 __global__ void sdpa_kernel_flash(
@@ -949,6 +982,16 @@ __global__ void cast_f16_to_f32(const __half* __restrict__ in, float* __restrict
     }
 }
 
+static size_t mma_smem_bytes(int64_t d_k, int64_t d_v) {
+    // s_q + s_k (each 16 * d_k halves) + s_v (16 * d_v halves) +
+    // s_scores (16x16 fp32) + s_o (16 * d_v fp32) + s_m + s_l + s_corr (3 * 16 fp32)
+    return (size_t)16 * (size_t)d_k * sizeof(__half) * 2
+         + (size_t)16 * (size_t)d_v * sizeof(__half)
+         + (size_t)16 * 16 * sizeof(float)
+         + (size_t)16 * (size_t)d_v * sizeof(float)
+         + (size_t)3 * 16 * sizeof(float);
+}
+
 void sdpa_mma_cuda(
     const float* Q,
     const float* K,
@@ -963,16 +1006,22 @@ void sdpa_mma_cuda(
     int64_t d_v
 ) {
     TENSORAX_NVTX_RANGE("sdpa.mma");
+    if (mask || d_k % 16 != 0 || d_v % 16 != 0 || seq_len_q % 16 != 0 || seq_len_k % 16 != 0) {
+        sdpa_tiled_cuda(Q, K, V, mask, out,
+                        batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v);
+        return;
+    }
+
     float scale = 1.0f / sqrtf(static_cast<float>(d_k));
-
     dim3 block(32);
-    dim3 grid(
-        1,
-        CEIL_DIV(seq_len_q, 16),
-        batch_size * num_heads
-    );
+    dim3 grid(1, CEIL_DIV(seq_len_q, 16), batch_size * num_heads);
 
-    size_t smem_size = (16 * 16 * 3) * sizeof(__half) + (16 * 16) * sizeof(float);
+    size_t smem_size = mma_smem_bytes(d_k, d_v);
+    if (smem_size > 48 * 1024) {
+        cudaFuncSetAttribute(sdpa_kernel_mma,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             (int)smem_size);
+    }
 
     sdpa_kernel_mma<<<grid, block, smem_size>>>(
         Q, K, V, mask, out,
@@ -991,10 +1040,20 @@ std::vector<long long> sdpa_mma_profile_sections_cuda(
     int64_t d_k, int64_t d_v
 ) {
     TENSORAX_NVTX_RANGE("sdpa.mma.profile");
+    if (mask || d_k % 16 != 0 || d_v % 16 != 0 || seq_len_q % 16 != 0 || seq_len_k % 16 != 0) {
+        return sdpa_tiled_profile_sections_cuda(Q, K, V, mask, out,
+                                               batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v);
+    }
+
     float scale = 1.0f / sqrtf(static_cast<float>(d_k));
     dim3 block(32);
     dim3 grid(1, CEIL_DIV(seq_len_q, 16), batch_size * num_heads);
-    size_t smem_size = (16 * 16 * 3) * sizeof(__half) + (16 * 16) * sizeof(float);
+    size_t smem_size = mma_smem_bytes(d_k, d_v);
+    if (smem_size > 48 * 1024) {
+        cudaFuncSetAttribute(sdpa_kernel_mma,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             (int)smem_size);
+    }
 
     long long* d_buf = prof::alloc_buf();
     sdpa_kernel_mma<<<grid, block, smem_size>>>(
