@@ -1,5 +1,6 @@
 #include "../cuda_utils.cuh"
 #include "../../tensor_ops.h"
+#include "../profiling.cuh"
 
 #include <cassert>
 #include <cmath>
@@ -115,8 +116,10 @@ __global__ void sdpa_kernel_naive(
     int seq_len_k,
     int d_k,
     int d_v,
-    float scale
+    float scale,
+    long long* prof_buf
 ) {
+    TX_TICK(prof_buf, 0);
     int b = blockIdx.z / num_heads;
     int h = blockIdx.z % num_heads;
     int q_idx = blockIdx.y * blockDim.y + threadIdx.y;
@@ -130,6 +133,7 @@ __global__ void sdpa_kernel_naive(
     const float* k_base = K + qkv_base * seq_len_k * d_k;
     const float* v_base = V + qkv_base * seq_len_k * d_v;
     const float* mask_row = mask ? mask + qkv_base * seq_len_q * seq_len_k + q_idx * seq_len_k : nullptr;
+    TX_TICK(prof_buf, 1);
 
     float max_score = -FLT_MAX;
     for (int j = 0; j < seq_len_k; j++) {
@@ -141,6 +145,7 @@ __global__ void sdpa_kernel_naive(
         if (mask_row) score += mask_row[j];
         if (score > max_score) max_score = score;
     }
+    TX_TICK(prof_buf, 2);
 
     float sum_exp = 0.0f;
     for (int j = 0; j < seq_len_k; j++) {
@@ -152,6 +157,7 @@ __global__ void sdpa_kernel_naive(
         if (mask_row) score += mask_row[j];
         sum_exp += expf(score - max_score);
     }
+    TX_TICK(prof_buf, 3);
 
     float result = 0.0f;
     for (int j = 0; j < seq_len_k; j++) {
@@ -164,8 +170,10 @@ __global__ void sdpa_kernel_naive(
         float attn_weight = expf(score - max_score) / sum_exp;
         result += attn_weight * v_base[j * d_v + v_idx];
     }
+    TX_TICK(prof_buf, 4);
 
     out[qkv_base * seq_len_q * d_v + q_idx * d_v + v_idx] = result;
+    TX_TICK(prof_buf, 5);
 }
 
 __global__ void sdpa_kernel_tiled(
@@ -181,8 +189,10 @@ __global__ void sdpa_kernel_tiled(
     int d_k,
     int d_v,
     float scale,
-    int tile_k
+    int tile_k,
+    long long* prof_buf
 ) {
+    TX_TICK(prof_buf, 0);
     int b = blockIdx.z / num_heads;
     int h = blockIdx.z % num_heads;
     int q_idx = blockIdx.y * blockDim.y + threadIdx.y;
@@ -204,6 +214,8 @@ __global__ void sdpa_kernel_tiled(
     float max_score = -FLT_MAX;
     float sum_exp = 0.0f;
     float acc = 0.0f;
+    bool first_tile = true;
+    TX_TICK(prof_buf, 1);
 
     for (int tile_start = 0; tile_start < seq_len_k; tile_start += tile_k) {
         int tile_end = min(tile_start + tile_k, seq_len_k);
@@ -217,6 +229,7 @@ __global__ void sdpa_kernel_tiled(
                 s_v[i * d_v + v_idx] = v_base[(tile_start + i) * d_v + v_idx];
             }
         }
+        if (first_tile) TX_TICK(prof_buf, 2);
         __syncthreads();
 
         if (v_idx < d_v) {
@@ -227,22 +240,29 @@ __global__ void sdpa_kernel_tiled(
                 }
                 score *= scale;
                 if (mask_row) score += mask_row[tile_start + j];
+                if (first_tile && j == 0) TX_TICK(prof_buf, 3);
 
                 float new_max = fmaxf(max_score, score);
                 float exp_old = expf(max_score - new_max);
                 float exp_new = expf(score - new_max);
+                if (first_tile && j == 0) TX_TICK(prof_buf, 4);
 
                 acc = acc * exp_old + exp_new * s_v[j * d_v + v_idx];
                 sum_exp = sum_exp * exp_old + exp_new;
                 max_score = new_max;
+                if (first_tile && j == 0) TX_TICK(prof_buf, 5);
             }
         }
+        if (first_tile) TX_TICK(prof_buf, 6);
+        first_tile = false;
         __syncthreads();
     }
+    TX_TICK(prof_buf, 7);
 
     if (v_idx < d_v) {
         out[qkv_base * seq_len_q * d_v + q_idx * d_v + v_idx] = acc / sum_exp;
     }
+    TX_TICK(prof_buf, 8);
 }
 
 __global__ void sdpa_kernel_mma(
@@ -257,8 +277,10 @@ __global__ void sdpa_kernel_mma(
     int seq_len_k,
     int d_k,
     int d_v,
-    float scale
+    float scale,
+    long long* prof_buf
 ) {
+    TX_TICK(prof_buf, 0);
     int b = blockIdx.z / num_heads;
     int h = blockIdx.z % num_heads;
     int q_start = blockIdx.y * 16;
@@ -281,48 +303,51 @@ __global__ void sdpa_kernel_mma(
 
     int row = tid / 2;
     int col_chunk = (tid % 2) * 8;
+    TX_TICK(prof_buf, 1);
 
-    // Fused fp32 -> fp16 on the way into shared memory: read 8 floats per
-    // thread (two float4), pack into four __half2, store as 8 halfs.
     const float4* gq = reinterpret_cast<const float4*>(q_base + (q_start + row) * d_k + col_chunk);
     float4 fq0 = gq[0];
     float4 fq1 = gq[1];
+    TX_TICK(prof_buf, 2);
+
     __half2* sq = reinterpret_cast<__half2*>(s_q + row * 16 + col_chunk);
     sq[0] = __floats2half2_rn(fq0.x, fq0.y);
     sq[1] = __floats2half2_rn(fq0.z, fq0.w);
     sq[2] = __floats2half2_rn(fq1.x, fq1.y);
     sq[3] = __floats2half2_rn(fq1.z, fq1.w);
+    TX_TICK(prof_buf, 3);
 
     const float4* gk = reinterpret_cast<const float4*>(k_ptr + row * d_k + col_chunk);
     float4 fk0 = gk[0];
     float4 fk1 = gk[1];
+    TX_TICK(prof_buf, 4);
+
     __half2* sk = reinterpret_cast<__half2*>(s_k + row * 16 + col_chunk);
     sk[0] = __floats2half2_rn(fk0.x, fk0.y);
     sk[1] = __floats2half2_rn(fk0.z, fk0.w);
     sk[2] = __floats2half2_rn(fk1.x, fk1.y);
     sk[3] = __floats2half2_rn(fk1.z, fk1.w);
-
     __syncthreads();
+    TX_TICK(prof_buf, 5);
 
-    uint32_t reg_q[4]; 
+    uint32_t reg_q[4];
     uint32_t reg_k0[2];
     uint32_t reg_k1[2];
-    
+
     float acc0[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     float acc1[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    
+
     int smem_row = tid % 16;
     int smem_col = (tid / 16) * 8;
 
     ldmatrix_m16n8_x4_b16(reg_q, s_q + smem_row * 16 + smem_col);
-
     ldmatrix_m16n8_x2_b16(reg_k0, s_k + smem_row * 16 + 0);
-
     ldmatrix_m16n8_x2_b16(reg_k1, s_k + smem_row * 16 + 8);
+    TX_TICK(prof_buf, 6);
 
     mma_m16n8k16_fp32_fp16_fp16_fp32(acc0, reg_q, reg_k0, acc0);
-
     mma_m16n8k16_fp32_fp16_fp16_fp32(acc1, reg_q, reg_k1, acc1);
+    TX_TICK(prof_buf, 7);
 
     int r0 = tid / 4;
     int r1 = tid / 4 + 8;
@@ -337,38 +362,39 @@ __global__ void sdpa_kernel_mma(
     s_scores[r0 * 16 + c0 + 8 + 1] = acc1[1];
     s_scores[r1 * 16 + c0 + 8 + 0] = acc1[2];
     s_scores[r1 * 16 + c0 + 8 + 1] = acc1[3];
-    
     __syncthreads();
+    TX_TICK(prof_buf, 8);
 
     if (tid < 16) {
         float row_max = -FLT_MAX;
-
         for (int i = 0; i < 16; i++) {
             s_scores[tid * 16 + i] *= scale;
             row_max = fmaxf(row_max, s_scores[tid * 16 + i]);
         }
-        
+        TX_TICK(prof_buf, 9);
+
         float row_sum = 0.0f;
         for (int i = 0; i < 16; i++) {
             float e = exp_approx(s_scores[tid * 16 + i] - row_max);
             s_scores[tid * 16 + i] = e;
             row_sum += e;
         }
+        TX_TICK(prof_buf, 10);
 
         for (int i = 0; i < 16; i++) {
-            s_k[tid * 16 + i] = __float2half(s_scores[tid * 16 + i] / row_sum); 
+            s_k[tid * 16 + i] = __float2half(s_scores[tid * 16 + i] / row_sum);
         }
     }
-    
     __syncthreads();
+    TX_TICK(prof_buf, 11);
 
-    // Fused fp32 -> fp16 V load (transposed into s_v): one float4 pair per
-    // thread; the transpose forces scalar stores into shared.
     int v_row = tid / 2;
     int v_col_chunk = (tid % 2) * 8;
     const float4* gv = reinterpret_cast<const float4*>(v_ptr + v_row * d_v + v_col_chunk);
     float4 fv0 = gv[0];
     float4 fv1 = gv[1];
+    TX_TICK(prof_buf, 12);
+
     s_v[(v_col_chunk + 0) * 16 + v_row] = __float2half(fv0.x);
     s_v[(v_col_chunk + 1) * 16 + v_row] = __float2half(fv0.y);
     s_v[(v_col_chunk + 2) * 16 + v_row] = __float2half(fv0.z);
@@ -377,23 +403,22 @@ __global__ void sdpa_kernel_mma(
     s_v[(v_col_chunk + 5) * 16 + v_row] = __float2half(fv1.y);
     s_v[(v_col_chunk + 6) * 16 + v_row] = __float2half(fv1.z);
     s_v[(v_col_chunk + 7) * 16 + v_row] = __float2half(fv1.w);
-    
     __syncthreads();
+    TX_TICK(prof_buf, 13);
 
     ldmatrix_m16n8_x4_b16(reg_q, s_k + smem_row * 16 + smem_col);
-    
     uint32_t reg_v0[2];
     uint32_t reg_v1[2];
     ldmatrix_m16n8_x2_b16(reg_v0, s_v + smem_row * 16 + 0);
     ldmatrix_m16n8_x2_b16(reg_v1, s_v + smem_row * 16 + 8);
+    TX_TICK(prof_buf, 14);
 
     float out_acc0[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     float out_acc1[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    
     mma_m16n8k16_fp32_fp16_fp16_fp32(out_acc0, reg_q, reg_v0, out_acc0);
     mma_m16n8k16_fp32_fp16_fp16_fp32(out_acc1, reg_q, reg_v1, out_acc1);
+    TX_TICK(prof_buf, 15);
 
-    // Output is fp32 directly (no fp16 round-trip).
     out_base[r0 * d_v + c0 + 0] = out_acc0[0];
     out_base[r0 * d_v + c0 + 1] = out_acc0[1];
     out_base[r1 * d_v + c0 + 0] = out_acc0[2];
@@ -403,6 +428,7 @@ __global__ void sdpa_kernel_mma(
     out_base[r0 * d_v + c0 + 8 + 1] = out_acc1[1];
     out_base[r1 * d_v + c0 + 8 + 0] = out_acc1[2];
     out_base[r1 * d_v + c0 + 8 + 1] = out_acc1[3];
+    TX_TICK(prof_buf, 16);
 }
 
 __global__ void sdpa_kernel_flash(
@@ -419,8 +445,10 @@ __global__ void sdpa_kernel_flash(
     int d_v,
     float scale,
     int br,
-    int bc
+    int bc,
+    long long* prof_buf
 ) {
+    TX_TICK(prof_buf, 0);
     int b = blockIdx.z / num_heads;
     int h = blockIdx.z % num_heads;
     int q_block = blockIdx.y;
@@ -462,8 +490,10 @@ __global__ void sdpa_kernel_flash(
         s_m[i] = -FLT_MAX;
         s_l[i] = 0.0f;
     }
+    TX_TICK(prof_buf, 1);
     __syncthreads();
 
+    bool first_kv = true;
     for (int kv_start = 0; kv_start < seq_len_k; kv_start += bc) {
         int kv_end = min(kv_start + bc, seq_len_k);
         int kv_len = kv_end - kv_start;
@@ -473,11 +503,13 @@ __global__ void sdpa_kernel_flash(
             int d = i % d_k;
             s_k[ki * d_k + d] = k_ptr[(kv_start + ki) * d_k + d];
         }
+        if (first_kv) TX_TICK(prof_buf, 2);
         for (int i = tid; i < kv_len * d_v; i += blockDim.x) {
             int vi = i / d_v;
             int d = i % d_v;
             s_v[vi * d_v + d] = v_ptr[(kv_start + vi) * d_v + d];
         }
+        if (first_kv) TX_TICK(prof_buf, 3);
         __syncthreads();
 
         for (int qi = tid; qi < q_len; qi += blockDim.x) {
@@ -495,6 +527,7 @@ __global__ void sdpa_kernel_flash(
                 s_scores[qi * bc + kj] = score;
                 if (score > new_max) new_max = score;
             }
+            if (first_kv && qi == 0) TX_TICK(prof_buf, 4);
 
             float correction = expf(row_max - new_max);
             float new_sum = row_sum * correction;
@@ -502,6 +535,7 @@ __global__ void sdpa_kernel_flash(
             for (int d = 0; d < d_v; d++) {
                 s_o[qi * d_v + d] *= correction;
             }
+            if (first_kv && qi == 0) TX_TICK(prof_buf, 5);
 
             for (int kj = 0; kj < kv_len; kj++) {
                 float p = expf(s_scores[qi * bc + kj] - new_max);
@@ -510,18 +544,23 @@ __global__ void sdpa_kernel_flash(
                     s_o[qi * d_v + d] += p * s_v[kj * d_v + d];
                 }
             }
+            if (first_kv && qi == 0) TX_TICK(prof_buf, 6);
 
             s_m[qi] = new_max;
             s_l[qi] = new_sum;
         }
+        if (first_kv) TX_TICK(prof_buf, 7);
+        first_kv = false;
         __syncthreads();
     }
+    TX_TICK(prof_buf, 8);
 
     for (int i = tid; i < q_len * d_v; i += blockDim.x) {
         int qi = i / d_v;
         int d = i % d_v;
         out_base[(q_start + qi) * d_v + d] = s_o[qi * d_v + d] / s_l[qi];
     }
+    TX_TICK(prof_buf, 9);
 }
 
 __global__ void sdpa_kernel_flash_optimized(
@@ -538,8 +577,10 @@ __global__ void sdpa_kernel_flash_optimized(
     int d_v,
     float scale,
     int br,
-    int bc
+    int bc,
+    long long* prof_buf
 ) {
+    TX_TICK(prof_buf, 0);
     int b = blockIdx.z / num_heads;
     int h = blockIdx.z % num_heads;
     int q_block = blockIdx.y;
@@ -586,8 +627,10 @@ __global__ void sdpa_kernel_flash_optimized(
         s_m[i] = -FLT_MAX;
         s_l[i] = 0.0f;
     }
+    TX_TICK(prof_buf, 1);
     __syncthreads();
 
+    bool first_kv = true;
     for (int kv_start = 0; kv_start < seq_len_k; kv_start += bc) {
         int kv_end = min(kv_start + bc, seq_len_k);
         int kv_len = kv_end - kv_start;
@@ -599,6 +642,7 @@ __global__ void sdpa_kernel_flash_optimized(
             tid,
             blockDim.x
         );
+        if (first_kv) TX_TICK(prof_buf, 2);
         block_load_f32_vec4(
             v_ptr + kv_start * d_v,
             s_v,
@@ -606,6 +650,7 @@ __global__ void sdpa_kernel_flash_optimized(
             tid,
             blockDim.x
         );
+        if (first_kv) TX_TICK(prof_buf, 3);
         __syncthreads();
 
         for (int qi = warp_id; qi < q_len; qi += num_warps) {
@@ -630,6 +675,7 @@ __global__ void sdpa_kernel_flash_optimized(
                     tile_max = fmaxf(tile_max, score);
                 }
             }
+            if (first_kv && qi == 0 && lane == 0) TX_TICK(prof_buf, 4);
 
             __syncwarp();
 
@@ -654,6 +700,7 @@ __global__ void sdpa_kernel_flash_optimized(
                     s_o[qi * d_v + d] *= correction;
                 }
             }
+            if (first_kv && qi == 0 && lane == 0) TX_TICK(prof_buf, 5);
 
             float new_sum = row_sum * correction;
             for (int kj = 0; kj < kv_len; kj++) {
@@ -665,20 +712,25 @@ __global__ void sdpa_kernel_flash_optimized(
                     s_o[qi * d_v + d] += p * s_v[kj * d_v + d];
                 }
             }
+            if (first_kv && qi == 0 && lane == 0) TX_TICK(prof_buf, 6);
 
             if (lane == 0) {
                 s_m[qi] = used_max;
                 s_l[qi] = new_sum;
             }
         }
+        if (first_kv) TX_TICK(prof_buf, 7);
+        first_kv = false;
         __syncthreads();
     }
+    TX_TICK(prof_buf, 8);
 
     for (int i = tid; i < q_len * d_v; i += blockDim.x) {
         int qi = i / d_v;
         int d = i % d_v;
         out_base[(q_start + qi) * d_v + d] = s_o[qi * d_v + d] / s_l[qi];
     }
+    TX_TICK(prof_buf, 9);
 }
 
 void sdpa_naive_cuda(
@@ -694,6 +746,7 @@ void sdpa_naive_cuda(
     int64_t d_k,
     int64_t d_v
 ) {
+    TENSORAX_NVTX_RANGE("sdpa.naive");
     float scale = 1.0f / sqrtf(static_cast<float>(d_k));
 
     dim3 block(16, 16);
@@ -705,7 +758,7 @@ void sdpa_naive_cuda(
 
     sdpa_kernel_naive<<<grid, block>>>(
         Q, K, V, mask, out,
-        batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v, scale
+        batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v, scale, nullptr
     );
 
     CUDA_CHECK(cudaGetLastError());
@@ -725,6 +778,7 @@ void sdpa_tiled_cuda(
     int64_t d_k,
     int64_t d_v
 ) {
+    TENSORAX_NVTX_RANGE("sdpa.tiled");
     float scale = 1.0f / sqrtf(static_cast<float>(d_k));
     int tile_k = cuda::compute_tiled_tile_k(d_k, d_v);
 
@@ -739,7 +793,7 @@ void sdpa_tiled_cuda(
 
     sdpa_kernel_tiled<<<grid, block, smem_size>>>(
         Q, K, V, mask, out,
-        batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v, scale, tile_k
+        batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v, scale, tile_k, nullptr
     );
 
     CUDA_CHECK(cudaGetLastError());
@@ -759,6 +813,7 @@ void sdpa_flash_cuda(
     int64_t d_k,
     int64_t d_v
 ) {
+    TENSORAX_NVTX_RANGE("sdpa.flash");
     float scale = 1.0f / sqrtf(static_cast<float>(d_k));
     int br, bc;
     cuda::compute_flash_tiles(d_k, d_v, br, bc);
@@ -781,7 +836,7 @@ void sdpa_flash_cuda(
 
     sdpa_kernel_flash<<<grid, block, smem_size>>>(
         Q, K, V, mask, out,
-        batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v, scale, br, bc
+        batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v, scale, br, bc, nullptr
     );
 
     CUDA_CHECK(cudaGetLastError());
@@ -801,6 +856,7 @@ void sdpa_optimized_flash_cuda(
     int64_t d_k,
     int64_t d_v
 ) {
+    TENSORAX_NVTX_RANGE("sdpa.flash_optimized");
     float scale = 1.0f / sqrtf(static_cast<float>(d_k));
     int br, bc;
     cuda::compute_flash_tiles(d_k, d_v, br, bc);
@@ -823,11 +879,40 @@ void sdpa_optimized_flash_cuda(
 
     sdpa_kernel_flash_optimized<<<grid, block, smem_size>>>(
         Q, K, V, mask, out,
-        batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v, scale, br, bc
+        batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v, scale, br, bc, nullptr
     );
 
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+std::vector<long long> sdpa_optimized_flash_profile_sections_cuda(
+    const float* Q, const float* K, const float* V,
+    const float* mask, float* out,
+    int64_t batch_size, int64_t num_heads,
+    int64_t seq_len_q, int64_t seq_len_k,
+    int64_t d_k, int64_t d_v
+) {
+    TENSORAX_NVTX_RANGE("sdpa.flash_optimized.profile");
+    float scale = 1.0f / sqrtf(static_cast<float>(d_k));
+    int br, bc;
+    cuda::compute_flash_tiles(d_k, d_v, br, bc);
+
+    int threads = 128;
+    dim3 block(threads);
+    dim3 grid(1, CEIL_DIV(seq_len_q, br), batch_size * num_heads);
+    size_t smem_size = ((size_t)br * d_k + (size_t)bc * d_k + (size_t)bc * d_v
+                      + (size_t)br * bc + (size_t)br * d_v
+                      + (size_t)br + (size_t)br) * sizeof(float);
+
+    long long* d_buf = prof::alloc_buf();
+    sdpa_kernel_flash_optimized<<<grid, block, smem_size>>>(
+        Q, K, V, mask, out,
+        batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v, scale, br, bc, d_buf
+    );
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+    return prof::read_buf(d_buf);
 }
 
 
@@ -877,6 +962,7 @@ void sdpa_mma_cuda(
     int64_t d_k,
     int64_t d_v
 ) {
+    TENSORAX_NVTX_RANGE("sdpa.mma");
     float scale = 1.0f / sqrtf(static_cast<float>(d_k));
 
     dim3 block(32);
@@ -890,11 +976,105 @@ void sdpa_mma_cuda(
 
     sdpa_kernel_mma<<<grid, block, smem_size>>>(
         Q, K, V, mask, out,
-        batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v, scale
+        batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v, scale, nullptr
     );
 
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+std::vector<long long> sdpa_mma_profile_sections_cuda(
+    const float* Q, const float* K, const float* V,
+    const float* mask, float* out,
+    int64_t batch_size, int64_t num_heads,
+    int64_t seq_len_q, int64_t seq_len_k,
+    int64_t d_k, int64_t d_v
+) {
+    TENSORAX_NVTX_RANGE("sdpa.mma.profile");
+    float scale = 1.0f / sqrtf(static_cast<float>(d_k));
+    dim3 block(32);
+    dim3 grid(1, CEIL_DIV(seq_len_q, 16), batch_size * num_heads);
+    size_t smem_size = (16 * 16 * 3) * sizeof(__half) + (16 * 16) * sizeof(float);
+
+    long long* d_buf = prof::alloc_buf();
+    sdpa_kernel_mma<<<grid, block, smem_size>>>(
+        Q, K, V, mask, out,
+        batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v, scale, d_buf
+    );
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+    return prof::read_buf(d_buf);
+}
+
+std::vector<long long> sdpa_naive_profile_sections_cuda(
+    const float* Q, const float* K, const float* V,
+    const float* mask, float* out,
+    int64_t batch_size, int64_t num_heads,
+    int64_t seq_len_q, int64_t seq_len_k,
+    int64_t d_k, int64_t d_v
+) {
+    TENSORAX_NVTX_RANGE("sdpa.naive.profile");
+    float scale = 1.0f / sqrtf(static_cast<float>(d_k));
+    dim3 block(16, 16);
+    dim3 grid(CEIL_DIV(d_v, block.x), CEIL_DIV(seq_len_q, block.y), batch_size * num_heads);
+    long long* d_buf = prof::alloc_buf();
+    sdpa_kernel_naive<<<grid, block>>>(
+        Q, K, V, mask, out,
+        batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v, scale, d_buf
+    );
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+    return prof::read_buf(d_buf);
+}
+
+std::vector<long long> sdpa_tiled_profile_sections_cuda(
+    const float* Q, const float* K, const float* V,
+    const float* mask, float* out,
+    int64_t batch_size, int64_t num_heads,
+    int64_t seq_len_q, int64_t seq_len_k,
+    int64_t d_k, int64_t d_v
+) {
+    TENSORAX_NVTX_RANGE("sdpa.tiled.profile");
+    float scale = 1.0f / sqrtf(static_cast<float>(d_k));
+    int tile_k = cuda::compute_tiled_tile_k(d_k, d_v);
+    dim3 block(16, 16);
+    dim3 grid(CEIL_DIV(d_v, block.x), CEIL_DIV(seq_len_q, block.y), batch_size * num_heads);
+    size_t smem_size = ((size_t)tile_k * d_k + (size_t)tile_k * d_v) * sizeof(float);
+    long long* d_buf = prof::alloc_buf();
+    sdpa_kernel_tiled<<<grid, block, smem_size>>>(
+        Q, K, V, mask, out,
+        batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v, scale, tile_k, d_buf
+    );
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+    return prof::read_buf(d_buf);
+}
+
+std::vector<long long> sdpa_flash_profile_sections_cuda(
+    const float* Q, const float* K, const float* V,
+    const float* mask, float* out,
+    int64_t batch_size, int64_t num_heads,
+    int64_t seq_len_q, int64_t seq_len_k,
+    int64_t d_k, int64_t d_v
+) {
+    TENSORAX_NVTX_RANGE("sdpa.flash.profile");
+    float scale = 1.0f / sqrtf(static_cast<float>(d_k));
+    int br, bc;
+    cuda::compute_flash_tiles(d_k, d_v, br, bc);
+    int threads = 128;
+    dim3 block(threads);
+    dim3 grid(1, CEIL_DIV(seq_len_q, br), batch_size * num_heads);
+    size_t smem_size = ((size_t)br * d_k + (size_t)bc * d_k + (size_t)bc * d_v
+                      + (size_t)br * bc + (size_t)br * d_v
+                      + (size_t)br + (size_t)br) * sizeof(float);
+    long long* d_buf = prof::alloc_buf();
+    sdpa_kernel_flash<<<grid, block, smem_size>>>(
+        Q, K, V, mask, out,
+        batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v, scale, br, bc, d_buf
+    );
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+    return prof::read_buf(d_buf);
 }
 
 

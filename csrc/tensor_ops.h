@@ -175,6 +175,45 @@ namespace tensorax
                                   float *out, int64_t batch_size, int64_t num_heads,
                                   int64_t seq_len_q, int64_t seq_len_k, int64_t d_k, int64_t d_v);
 
+    std::vector<long long> matmul_naive_profile_sections_cuda(
+        const float *a, const float *b, float *c,
+        int64_t m, int64_t n, int64_t k);
+    std::vector<long long> matmul_tiled_profile_sections_cuda(
+        const float *a, const float *b, float *c,
+        int64_t m, int64_t n, int64_t k);
+    std::vector<long long> matmul_shared_memory_coalesced_profile_sections_cuda(
+        const float *a, const float *b, float *c,
+        int64_t m, int64_t n, int64_t k, float alpha, float beta);
+    std::vector<long long> matmul_shared_memory_cache_blocking_profile_sections_cuda(
+        const float *a, const float *b, float *c,
+        int64_t m, int64_t n, int64_t k, float alpha, float beta);
+    std::vector<long long> matmul_1d_blocktiling_profile_sections_cuda(
+        const float *a, const float *b, float *c,
+        int64_t m, int64_t n, int64_t k, float alpha, float beta);
+    std::vector<long long> matmul_2d_blocktiling_profile_sections_cuda(
+        const float *a, const float *b, float *c,
+        int64_t m, int64_t n, int64_t k, float alpha, float beta);
+    std::vector<long long> sdpa_naive_profile_sections_cuda(
+        const float *Q, const float *K, const float *V, const float *mask, float *out,
+        int64_t batch_size, int64_t num_heads,
+        int64_t seq_len_q, int64_t seq_len_k, int64_t d_k, int64_t d_v);
+    std::vector<long long> sdpa_tiled_profile_sections_cuda(
+        const float *Q, const float *K, const float *V, const float *mask, float *out,
+        int64_t batch_size, int64_t num_heads,
+        int64_t seq_len_q, int64_t seq_len_k, int64_t d_k, int64_t d_v);
+    std::vector<long long> sdpa_flash_profile_sections_cuda(
+        const float *Q, const float *K, const float *V, const float *mask, float *out,
+        int64_t batch_size, int64_t num_heads,
+        int64_t seq_len_q, int64_t seq_len_k, int64_t d_k, int64_t d_v);
+    std::vector<long long> sdpa_mma_profile_sections_cuda(
+        const float *Q, const float *K, const float *V, const float *mask, float *out,
+        int64_t batch_size, int64_t num_heads,
+        int64_t seq_len_q, int64_t seq_len_k, int64_t d_k, int64_t d_v);
+    std::vector<long long> sdpa_optimized_flash_profile_sections_cuda(
+        const float *Q, const float *K, const float *V, const float *mask, float *out,
+        int64_t batch_size, int64_t num_heads,
+        int64_t seq_len_q, int64_t seq_len_k, int64_t d_k, int64_t d_v);
+
     void *cuda_malloc(size_t size);
     void cuda_free(void *ptr);
     void cuda_memcpy_h2d(void *dst, const void *src, size_t size);

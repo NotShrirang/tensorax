@@ -106,11 +106,58 @@ What's here now: core tensor ops, autograd, all the layers/norms/activations lis
 
 What's next: Conv2D, MaxPool2D, AdamW, tensor indexing/slicing, model serialization, DataLoader, multi-GPU, mixed precision, DDP, ONNX export.
 
+## Profiling
+
+Tensorax includes fine-grained kernel profiling capabilities to measure performance at the section level. This is useful for identifying bottlenecks and understanding kernel behavior.
+
+### Building with profiling support
+
+```bash
+TENSORAX_PROFILE=1 pip install -e .
+```
+
+This enables device-side clock64 ticks in CUDA kernels, allowing per-section timing measurements.
+
+### Profile section APIs
+
+For **matmul kernels**:
+```python
+from tensorax import functional as F
+
+a = F.randn((1024, 1024), device='cuda')
+b = F.randn((1024, 1024), device='cuda')
+
+# Profile naive matmul
+sections = F.profile_sections_matmul_naive(a, b)
+# sections is a vector<long long> with clock64 ticks for each kernel section
+
+# Other variants: tiled, shared_memory_coalesced, shared_memory_cache_blocking, 
+# 1d_blocktiling, 2d_blocktiling
+```
+
+For **attention (SDPA) kernels**:
+```python
+# Query, Key, Value tensors
+q = F.randn((4, 8, 256, 64), device='cuda')   # (B, H, S, Dk)
+k = F.randn((4, 8, 256, 64), device='cuda')
+v = F.randn((4, 8, 256, 64), device='cuda')
+
+# Profile variants: naive, tiled, flash, mma, flash_optimized
+sections = F.profile_sections_sdpa_naive(q, k, v, mask=None)
+sections = F.profile_sections_sdpa_mma(q, k, v, mask=None)
+sections = F.profile_sections_sdpa_flash_optimized(q, k, v, mask=None)
+```
+
+Each function returns a vector of `long long` values representing device clock64 ticks for sequential sections of the kernel. This enables precise measurement of specific computation phases without host-device synchronization overhead per-section.
+
+See [profiling results](docs/profiling/RESULTS.md) for benchmark data and section-by-section breakdowns.
+
 ## Docs
 
 - [Usage Guide](docs/USAGE.md) — full API reference with code examples
 - [Architecture](docs/ARCHITECTURE.md) — system design, kernel strategy, autograd internals
 - [Development](docs/DEVELOPMENT.md) — building from source, testing, contributing
+- [Profiling](docs/profiling/RESULTS.md) — kernel profiling results and section analysis
 - [Examples](examples/) — runnable scripts
 
 ## Citation

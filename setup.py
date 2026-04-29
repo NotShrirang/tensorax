@@ -103,25 +103,30 @@ class BuildExtension(build_ext):
         # Replace compile method
         self.compiler._compile = custom_compile
         
-        # Customize compiler flags per extension
+        profile = bool(os.environ.get('TENSORAX_PROFILE'))
+        cxx_flags = ['-O3', '-std=c++17', '-fPIC']
+        nvcc_flags = [
+            '-O3',
+            '--use_fast_math',
+            '-std=c++17',
+            '--compiler-options', '-fPIC',
+            '-gencode=arch=compute_80,code=sm_80',
+            '-gencode=arch=compute_86,code=sm_86',
+            '-gencode=arch=compute_89,code=sm_89',
+        ]
+        if profile:
+            print("TENSORAX_PROFILE=1 -- emitting device-side clock64 ticks")
+            cxx_flags.append('-DTENSORAX_PROFILE')
+            nvcc_flags.append('-DTENSORAX_PROFILE')
+
         for ext in self.extensions:
             if isinstance(ext, CUDAExtension):
-                # CUDA-specific flags
                 ext.extra_compile_args = {
-                    'cxx': ['-O3', '-std=c++17', '-fPIC'],
-                    'nvcc': [
-                        '-O3',
-                        '--use_fast_math',
-                        '-std=c++17',
-                        '--compiler-options', '-fPIC',
-                        '-gencode=arch=compute_80,code=sm_80',  # A100
-                        '-gencode=arch=compute_86,code=sm_86',  # RTX 30xx
-                        '-gencode=arch=compute_89,code=sm_89',  # RTX 40xx (CUDA 11.8+)
-                    ]
+                    'cxx': cxx_flags,
+                    'nvcc': nvcc_flags,
                 }
             else:
-                # CPU-only flags
-                ext.extra_compile_args = ['-O3', '-std=c++17', '-fPIC']
+                ext.extra_compile_args = list(cxx_flags)
         
         build_ext.build_extensions(self)
 

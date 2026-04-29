@@ -1231,6 +1231,174 @@ namespace tensorax
         return std::make_shared<TensorImpl>(data, shape, dtype, device);
     }
 
+#ifdef WITH_CUDA
+    namespace _prof_helpers {
+        struct MatmulShape {
+            int64_t m, n, k;
+            TensorHandle result;
+        };
+        inline MatmulShape prepare_matmul(const TensorHandle &a, const TensorHandle &b)
+        {
+            if (a->device != "cuda" || b->device != "cuda")
+                throw std::runtime_error("profile_sections requires CUDA tensors");
+            size_t a_dims = a->shape.size();
+            int64_t m = a->shape[a_dims - 2];
+            int64_t k = a->shape[a_dims - 1];
+            int64_t n = b->shape[b->shape.size() - 1];
+            std::vector<int64_t> result_shape;
+            for (size_t i = 0; i < a_dims - 2; ++i) result_shape.push_back(a->shape[i]);
+            result_shape.push_back(m);
+            result_shape.push_back(n);
+            int64_t batch_size = 1;
+            for (size_t i = 0; i < a_dims - 2; ++i) batch_size *= a->shape[i];
+            auto result = std::make_shared<TensorImpl>(
+                std::vector<float>(batch_size * m * n), result_shape, a->dtype, a->device);
+            return {m, n, k, result};
+        }
+
+        struct SdpaShape {
+            int64_t batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v;
+            TensorHandle out;
+        };
+        inline SdpaShape prepare_sdpa(const TensorHandle &q, const TensorHandle &k, const TensorHandle &v)
+        {
+            if (q->device != "cuda") throw std::runtime_error("profile_sections requires CUDA tensors");
+            int64_t batch_size = q->shape[0];
+            int64_t num_heads = q->shape[1];
+            int64_t seq_len_q = q->shape[2];
+            int64_t d_k = q->shape[3];
+            int64_t seq_len_k = k->shape[2];
+            int64_t d_v = v->shape[3];
+            std::vector<int64_t> out_shape = {batch_size, num_heads, seq_len_q, d_v};
+            auto out = std::make_shared<TensorImpl>(
+                std::vector<float>(batch_size * num_heads * seq_len_q * d_v, 0.0f),
+                out_shape, q->dtype, q->device);
+            return {batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v, out};
+        }
+    }
+
+    std::vector<long long> profile_sections_matmul_naive(
+        const TensorHandle &a, const TensorHandle &b)
+    {
+        auto s = _prof_helpers::prepare_matmul(a, b);
+        return matmul_naive_profile_sections_cuda(a->data, b->data, s.result->data, s.m, s.n, s.k);
+    }
+
+    std::vector<long long> profile_sections_matmul_tiled(
+        const TensorHandle &a, const TensorHandle &b)
+    {
+        auto s = _prof_helpers::prepare_matmul(a, b);
+        return matmul_tiled_profile_sections_cuda(a->data, b->data, s.result->data, s.m, s.n, s.k);
+    }
+
+    std::vector<long long> profile_sections_matmul_shared_memory_coalesced(
+        const TensorHandle &a, const TensorHandle &b, float alpha, float beta)
+    {
+        auto s = _prof_helpers::prepare_matmul(a, b);
+        return matmul_shared_memory_coalesced_profile_sections_cuda(
+            a->data, b->data, s.result->data, s.m, s.n, s.k, alpha, beta);
+    }
+
+    std::vector<long long> profile_sections_matmul_shared_memory_cache_blocking(
+        const TensorHandle &a, const TensorHandle &b, float alpha, float beta)
+    {
+        auto s = _prof_helpers::prepare_matmul(a, b);
+        return matmul_shared_memory_cache_blocking_profile_sections_cuda(
+            a->data, b->data, s.result->data, s.m, s.n, s.k, alpha, beta);
+    }
+
+    std::vector<long long> profile_sections_matmul_1d_blocktiling(
+        const TensorHandle &a, const TensorHandle &b, float alpha, float beta)
+    {
+        auto s = _prof_helpers::prepare_matmul(a, b);
+        return matmul_1d_blocktiling_profile_sections_cuda(
+            a->data, b->data, s.result->data, s.m, s.n, s.k, alpha, beta);
+    }
+
+    std::vector<long long> profile_sections_matmul_2d_blocktiling(
+        const TensorHandle &a, const TensorHandle &b, float alpha, float beta)
+    {
+        auto s = _prof_helpers::prepare_matmul(a, b);
+        return matmul_2d_blocktiling_profile_sections_cuda(
+            a->data, b->data, s.result->data, s.m, s.n, s.k, alpha, beta);
+    }
+
+    std::vector<long long> profile_sections_sdpa_naive(
+        const TensorHandle &q, const TensorHandle &k, const TensorHandle &v,
+        const TensorHandle &mask)
+    {
+        auto s = _prof_helpers::prepare_sdpa(q, k, v);
+        const float *mask_ptr = mask ? mask->data : nullptr;
+        return sdpa_naive_profile_sections_cuda(
+            q->data, k->data, v->data, mask_ptr, s.out->data,
+            s.batch_size, s.num_heads, s.seq_len_q, s.seq_len_k, s.d_k, s.d_v);
+    }
+
+    std::vector<long long> profile_sections_sdpa_tiled(
+        const TensorHandle &q, const TensorHandle &k, const TensorHandle &v,
+        const TensorHandle &mask)
+    {
+        auto s = _prof_helpers::prepare_sdpa(q, k, v);
+        const float *mask_ptr = mask ? mask->data : nullptr;
+        return sdpa_tiled_profile_sections_cuda(
+            q->data, k->data, v->data, mask_ptr, s.out->data,
+            s.batch_size, s.num_heads, s.seq_len_q, s.seq_len_k, s.d_k, s.d_v);
+    }
+
+    std::vector<long long> profile_sections_sdpa_flash(
+        const TensorHandle &q, const TensorHandle &k, const TensorHandle &v,
+        const TensorHandle &mask)
+    {
+        auto s = _prof_helpers::prepare_sdpa(q, k, v);
+        const float *mask_ptr = mask ? mask->data : nullptr;
+        return sdpa_flash_profile_sections_cuda(
+            q->data, k->data, v->data, mask_ptr, s.out->data,
+            s.batch_size, s.num_heads, s.seq_len_q, s.seq_len_k, s.d_k, s.d_v);
+    }
+
+    std::vector<long long> profile_sections_sdpa_mma(
+        const TensorHandle &q, const TensorHandle &k, const TensorHandle &v,
+        const TensorHandle &mask)
+    {
+        if (q->device != "cuda") throw std::runtime_error("profile_sections requires CUDA tensors");
+        int64_t batch_size = q->shape[0];
+        int64_t num_heads = q->shape[1];
+        int64_t seq_len_q = q->shape[2];
+        int64_t d_k = q->shape[3];
+        int64_t seq_len_k = k->shape[2];
+        int64_t d_v = v->shape[3];
+        std::vector<int64_t> out_shape = {batch_size, num_heads, seq_len_q, d_v};
+        auto out = std::make_shared<TensorImpl>(
+            std::vector<float>(batch_size * num_heads * seq_len_q * d_v, 0.0f),
+            out_shape, q->dtype, q->device);
+        const float *mask_ptr = mask ? mask->data : nullptr;
+        return sdpa_mma_profile_sections_cuda(
+            q->data, k->data, v->data, mask_ptr, out->data,
+            batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v);
+    }
+
+    std::vector<long long> profile_sections_sdpa_flash_optimized(
+        const TensorHandle &q, const TensorHandle &k, const TensorHandle &v,
+        const TensorHandle &mask)
+    {
+        if (q->device != "cuda") throw std::runtime_error("profile_sections requires CUDA tensors");
+        int64_t batch_size = q->shape[0];
+        int64_t num_heads = q->shape[1];
+        int64_t seq_len_q = q->shape[2];
+        int64_t d_k = q->shape[3];
+        int64_t seq_len_k = k->shape[2];
+        int64_t d_v = v->shape[3];
+        std::vector<int64_t> out_shape = {batch_size, num_heads, seq_len_q, d_v};
+        auto out = std::make_shared<TensorImpl>(
+            std::vector<float>(batch_size * num_heads * seq_len_q * d_v, 0.0f),
+            out_shape, q->dtype, q->device);
+        const float *mask_ptr = mask ? mask->data : nullptr;
+        return sdpa_optimized_flash_profile_sections_cuda(
+            q->data, k->data, v->data, mask_ptr, out->data,
+            batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v);
+    }
+#endif
+
 } // namespace tensoraxx
 
 // Python bindings
@@ -1318,6 +1486,39 @@ PYBIND11_MODULE(_C, m)
 
 #ifdef WITH_CUDA
     m.def("cuda_is_available", &tensorax::cuda_is_available);
+    m.def("profile_sections_matmul_naive",
+          &tensorax::profile_sections_matmul_naive,
+          py::arg("a"), py::arg("b"));
+    m.def("profile_sections_matmul_tiled",
+          &tensorax::profile_sections_matmul_tiled,
+          py::arg("a"), py::arg("b"));
+    m.def("profile_sections_matmul_shared_memory_coalesced",
+          &tensorax::profile_sections_matmul_shared_memory_coalesced,
+          py::arg("a"), py::arg("b"), py::arg("alpha") = 1.0f, py::arg("beta") = 0.0f);
+    m.def("profile_sections_matmul_shared_memory_cache_blocking",
+          &tensorax::profile_sections_matmul_shared_memory_cache_blocking,
+          py::arg("a"), py::arg("b"), py::arg("alpha") = 1.0f, py::arg("beta") = 0.0f);
+    m.def("profile_sections_matmul_1d_blocktiling",
+          &tensorax::profile_sections_matmul_1d_blocktiling,
+          py::arg("a"), py::arg("b"), py::arg("alpha") = 1.0f, py::arg("beta") = 0.0f);
+    m.def("profile_sections_matmul_2d_blocktiling",
+          &tensorax::profile_sections_matmul_2d_blocktiling,
+          py::arg("a"), py::arg("b"), py::arg("alpha") = 1.0f, py::arg("beta") = 0.0f);
+    m.def("profile_sections_sdpa_naive",
+          &tensorax::profile_sections_sdpa_naive,
+          py::arg("q"), py::arg("k"), py::arg("v"), py::arg("mask") = tensorax::TensorHandle());
+    m.def("profile_sections_sdpa_tiled",
+          &tensorax::profile_sections_sdpa_tiled,
+          py::arg("q"), py::arg("k"), py::arg("v"), py::arg("mask") = tensorax::TensorHandle());
+    m.def("profile_sections_sdpa_flash",
+          &tensorax::profile_sections_sdpa_flash,
+          py::arg("q"), py::arg("k"), py::arg("v"), py::arg("mask") = tensorax::TensorHandle());
+    m.def("profile_sections_sdpa_mma",
+          &tensorax::profile_sections_sdpa_mma,
+          py::arg("q"), py::arg("k"), py::arg("v"), py::arg("mask") = tensorax::TensorHandle());
+    m.def("profile_sections_sdpa_flash_optimized",
+          &tensorax::profile_sections_sdpa_flash_optimized,
+          py::arg("q"), py::arg("k"), py::arg("v"), py::arg("mask") = tensorax::TensorHandle());
 #else
     m.def("cuda_is_available", []()
           { return false; });
