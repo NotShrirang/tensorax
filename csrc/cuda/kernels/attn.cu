@@ -280,7 +280,6 @@ __global__ void sdpa_kernel_mma(
     float scale,
     long long* prof_buf
 ) {
-    TX_TICK(prof_buf, 0);
     int b = blockIdx.z / num_heads;
     int h = blockIdx.z % num_heads;
     int q_start = blockIdx.y * 16;
@@ -312,7 +311,25 @@ __global__ void sdpa_kernel_mma(
 
     int b_col   = tid & 7;
     int b_khalf = ((tid >> 3) & 1) * 8;
-    TX_TICK(prof_buf, 1);
+
+#ifdef TENSORAX_PROFILE
+    // Cumulative-per-section timing (block 0,0,0 thread 0 only). Pre/post-loop sections
+    // are measured once. In-loop sections accumulate across all KV iterations.
+    bool log = (prof_buf != nullptr &&
+                threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0 &&
+                blockIdx.x  == 0 && blockIdx.y  == 0 && blockIdx.z  == 0);
+    long long t_entry      = log ? clock64() : 0;
+    long long t_setup_end  = 0, t_qload_end = 0, t_loop_end = 0;
+    long long sec_kvload   = 0;  // load + cast K, V
+    long long sec_qkt      = 0;  // Q @ K^T MMA accumulation
+    long long sec_softmax  = 0;  // score scale + write + online softmax
+    long long sec_pcast    = 0;  // cast P to fp16 + rescale O accumulator
+    long long sec_pv       = 0;  // P @ V MMA across d_v chunks
+#endif
+
+#ifdef TENSORAX_PROFILE
+    if (log) t_setup_end = clock64();
+#endif
 
     int total_q4 = (16 * d_k) / 4;
     for (int i = tid; i < total_q4; i += 32) {
@@ -329,13 +346,18 @@ __global__ void sdpa_kernel_mma(
     for (int i = tid; i < total_o; i += 32) s_o[i] = 0.0f;
     if (tid < 16) { s_m[tid] = -FLT_MAX; s_l[tid] = 0.0f; }
     __syncthreads();
-    TX_TICK(prof_buf, 2);
+
+#ifdef TENSORAX_PROFILE
+    if (log) t_qload_end = clock64();
+#endif
 
     int dk_chunks = d_k / 16;
     int dv_chunks = d_v / 16;
 
-    bool first_kv = true;
     for (int kv_start = 0; kv_start < seq_len_k; kv_start += 16) {
+#ifdef TENSORAX_PROFILE
+        long long t0 = log ? clock64() : 0;
+#endif
         int total_k4 = (16 * d_k) / 4;
         for (int i = tid; i < total_k4; i += 32) {
             int idx = i * 4;
@@ -363,7 +385,11 @@ __global__ void sdpa_kernel_mma(
             s_v[(n + 7) * 16 + k] = __float2half(v1.w);
         }
         __syncthreads();
-        if (first_kv) TX_TICK(prof_buf, 3);
+
+#ifdef TENSORAX_PROFILE
+        long long t1 = log ? clock64() : 0;
+        if (log) sec_kvload += t1 - t0;
+#endif
 
         float acc0[4] = {0.0f, 0.0f, 0.0f, 0.0f};
         float acc1[4] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -378,7 +404,11 @@ __global__ void sdpa_kernel_mma(
             mma_m16n8k16_fp32_fp16_fp16_fp32(acc0, reg_q, reg_k0, acc0);
             mma_m16n8k16_fp32_fp16_fp16_fp32(acc1, reg_q, reg_k1, acc1);
         }
-        if (first_kv) TX_TICK(prof_buf, 4);
+
+#ifdef TENSORAX_PROFILE
+        long long t2 = log ? clock64() : 0;
+        if (log) sec_qkt += t2 - t1;
+#endif
 
         s_scores[r0 * 16 + c0]         = acc0[0] * scale;
         s_scores[r0 * 16 + c0 + 1]     = acc0[1] * scale;
@@ -409,7 +439,11 @@ __global__ void sdpa_kernel_mma(
             s_corr[tid] = corr;
         }
         __syncthreads();
-        if (first_kv) TX_TICK(prof_buf, 5);
+
+#ifdef TENSORAX_PROFILE
+        long long t3 = log ? clock64() : 0;
+        if (log) sec_softmax += t3 - t2;
+#endif
 
         for (int i = tid; i < 256 / 2; i += 32) {
             int idx = i * 2;
@@ -421,7 +455,11 @@ __global__ void sdpa_kernel_mma(
             s_o[i] *= s_corr[row];
         }
         __syncthreads();
-        if (first_kv) TX_TICK(prof_buf, 6);
+
+#ifdef TENSORAX_PROFILE
+        long long t4 = log ? clock64() : 0;
+        if (log) sec_pcast += t4 - t3;
+#endif
 
         for (int dv_chunk = 0; dv_chunk < dv_chunks; dv_chunk++) {
             int dv = dv_chunk * 16;
@@ -447,10 +485,16 @@ __global__ void sdpa_kernel_mma(
             s_o[r1 * d_v + dv + c0 + 8 + 1] += oacc1[3];
         }
         __syncthreads();
-        if (first_kv) TX_TICK(prof_buf, 7);
-        first_kv = false;
+
+#ifdef TENSORAX_PROFILE
+        long long t5 = log ? clock64() : 0;
+        if (log) sec_pv += t5 - t4;
+#endif
     }
-    TX_TICK(prof_buf, 8);
+
+#ifdef TENSORAX_PROFILE
+    if (log) t_loop_end = clock64();
+#endif
 
     if (tid < 16) {
         int qrow = q_start + tid;
@@ -461,7 +505,25 @@ __global__ void sdpa_kernel_mma(
             }
         }
     }
-    TX_TICK(prof_buf, 9);
+
+#ifdef TENSORAX_PROFILE
+    if (log) {
+        long long t_end = clock64();
+        // Cumulative tick layout (consumer diffs to recover per-section time):
+        //   [0]=0; [1]=Setup; [2]=+Load Q+init; [3]=+Load K,V (cum);
+        //   [4]=+Q@K^T (cum); [5]=+Softmax (cum); [6]=+Cast P + rescale O (cum);
+        //   [7]=+P@V (cum); [8]=+Final normalize and write
+        prof_buf[0] = 0;
+        prof_buf[1] = t_setup_end - t_entry;
+        prof_buf[2] = prof_buf[1] + (t_qload_end - t_setup_end);
+        prof_buf[3] = prof_buf[2] + sec_kvload;
+        prof_buf[4] = prof_buf[3] + sec_qkt;
+        prof_buf[5] = prof_buf[4] + sec_softmax;
+        prof_buf[6] = prof_buf[5] + sec_pcast;
+        prof_buf[7] = prof_buf[6] + sec_pv;
+        prof_buf[8] = prof_buf[7] + (t_end - t_loop_end);
+    }
+#endif
 }
 
 __global__ void sdpa_kernel_flash(

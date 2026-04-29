@@ -101,12 +101,11 @@ SECTIONS = {
     "sdpa.mma": [
         "Setup",
         "Load Q + initialize accumulators",
-        "First KV tile: load and cast K, V",
-        "First KV tile: Q * K-transposed (tensor core)",
-        "First KV tile: online softmax",
-        "First KV tile: cast P + rescale O",
-        "First KV tile: P * V (tensor core)",
-        "Remaining KV tiles",
+        "Load and cast K, V (all KV tiles)",
+        "Q * K-transposed tensor core (all KV tiles)",
+        "Online softmax (all KV tiles)",
+        "Cast P + rescale O (all KV tiles)",
+        "P * V tensor core (all KV tiles)",
         "Final normalize and write output",
     ],
     "sdpa.flash_optimized": [
