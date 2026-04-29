@@ -322,8 +322,9 @@ __global__ void sdpa_kernel_mma(
     float*  s_vstage_f32 = reinterpret_cast<float*>(s_kchunk + 2 * 16 * 16);
     __half* s_vchunk     = reinterpret_cast<__half*>(s_vstage_f32 + 4 * 2 * 16 * 16);
     float*  s_scores     = reinterpret_cast<float*>(s_vchunk + 4 * 2 * 16 * 16);
-    float*  s_o          = s_scores + 16 * 16;
-    float*  s_m          = s_o + 16 * d_v;
+    // s_o is now a per-warp register array (oacc0/oacc1 below) — eliminating the
+    // 16*d_v fp32 smem buffer and the per-tile rescale read/write traffic.
+    float*  s_m          = s_scores + 16 * 16;
     float*  s_l          = s_m + 16;
     float*  s_corr       = s_l + 16;
 
@@ -355,9 +356,18 @@ __global__ void sdpa_kernel_mma(
         s[1] = __floats2half2_rn(v.z, v.w);
     }
 
-    int total_o = 16 * d_v;
-    for (int i = tid; i < total_o; i += 128) s_o[i] = 0.0f;
     if (tid < 16) { s_m[tid] = -FLT_MAX; s_l[tid] = 0.0f; }
+
+    // Output accumulators in registers — one set per dv chunk this warp owns.
+    // MAX_CHUNKS is sized to cover up to d_v=1024 with 4-warp split (16 cells/warp).
+    constexpr int MAX_CHUNKS = 16;
+    float oacc0[MAX_CHUNKS][4];
+    float oacc1[MAX_CHUNKS][4];
+    #pragma unroll
+    for (int i = 0; i < MAX_CHUNKS; i++) {
+        oacc0[i][0] = oacc0[i][1] = oacc0[i][2] = oacc0[i][3] = 0.0f;
+        oacc1[i][0] = oacc1[i][1] = oacc1[i][2] = oacc1[i][3] = 0.0f;
+    }
     __syncthreads();
 
 #ifdef TENSORAX_PROFILE
@@ -482,9 +492,22 @@ __global__ void sdpa_kernel_mma(
             *reinterpret_cast<__half2*>(s_p + idx) =
                 __floats2half2_rn(s_scores[idx], s_scores[idx + 1]);
         }
-        for (int i = tid; i < 16 * d_v; i += 128) {
-            int row = i / d_v;
-            s_o[i] *= s_corr[row];
+        // Rescale per-warp register accumulators by per-row corr.
+        // Each thread holds oacc cells for rows r0 and r1, so just two scalars needed.
+        {
+            float corr_r0 = s_corr[r0];
+            float corr_r1 = s_corr[r1];
+            #pragma unroll
+            for (int i = 0; i < MAX_CHUNKS; i++) {
+                oacc0[i][0] *= corr_r0;
+                oacc0[i][1] *= corr_r0;
+                oacc0[i][2] *= corr_r1;
+                oacc0[i][3] *= corr_r1;
+                oacc1[i][0] *= corr_r0;
+                oacc1[i][1] *= corr_r0;
+                oacc1[i][2] *= corr_r1;
+                oacc1[i][3] *= corr_r1;
+            }
         }
         __syncthreads();
 
@@ -530,19 +553,10 @@ __global__ void sdpa_kernel_mma(
             ldmatrix_m16n8_x2_b16(reg_v0, s_vchunk + v_slot +  b_col      * 16 + b_khalf);
             ldmatrix_m16n8_x2_b16(reg_v1, s_vchunk + v_slot + (b_col + 8) * 16 + b_khalf);
 
-            float oacc0[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-            float oacc1[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-            mma_m16n8k16_fp32_fp16_fp16_fp32(oacc0, reg_p, reg_v0, oacc0);
-            mma_m16n8k16_fp32_fp16_fp16_fp32(oacc1, reg_p, reg_v1, oacc1);
-
-            s_o[r0 * d_v + dv + c0]         += oacc0[0];
-            s_o[r0 * d_v + dv + c0 + 1]     += oacc0[1];
-            s_o[r1 * d_v + dv + c0]         += oacc0[2];
-            s_o[r1 * d_v + dv + c0 + 1]     += oacc0[3];
-            s_o[r0 * d_v + dv + c0 + 8]     += oacc1[0];
-            s_o[r0 * d_v + dv + c0 + 8 + 1] += oacc1[1];
-            s_o[r1 * d_v + dv + c0 + 8]     += oacc1[2];
-            s_o[r1 * d_v + dv + c0 + 8 + 1] += oacc1[3];
+            // MMA accumulates directly into the persistent register accumulators
+            // (C operand = previous oacc, D operand = oacc[dvc] in-place).
+            mma_m16n8k16_fp32_fp16_fp16_fp32(oacc0[dvc], reg_p, reg_v0, oacc0[dvc]);
+            mma_m16n8k16_fp32_fp16_fp16_fp32(oacc1[dvc], reg_p, reg_v1, oacc1[dvc]);
         }
         }
         __syncthreads();
@@ -551,15 +565,38 @@ __global__ void sdpa_kernel_mma(
 #ifdef TENSORAX_PROFILE
     if (log) t_loop_end = clock64();
 #endif
+    // Per-warp register-to-global write. Each warp owns dv_chunks_per_warp chunks
+    // starting at dv_start; recompute that here (same logic as in the kv loop).
     {
-        int total = 16 * d_v;
-        for (int i = tid; i < total; i += 128) {
-            int row = i / d_v;
-            int col = i % d_v;
-            int qrow = q_start + row;
-            if (qrow < seq_len_q) {
-                float inv_l = 1.0f / s_l[row];
-                out_base[qrow * d_v + col] = s_o[i] * inv_l;
+        int dv_per_warp_o, dv_start_o, dv_chunks_per_warp_o;
+        if (d_v >= 64) {
+            dv_per_warp_o        = d_v / 4;
+            dv_start_o           = warp_id * dv_per_warp_o;
+            dv_chunks_per_warp_o = dv_per_warp_o / 16;
+        } else {
+            dv_per_warp_o        = d_v;
+            dv_start_o           = 0;
+            dv_chunks_per_warp_o = (warp_id == 0) ? (d_v / 16) : 0;
+        }
+        int q0 = q_start + r0;
+        int q1 = q_start + r1;
+        bool ok0 = (q0 < seq_len_q);
+        bool ok1 = (q1 < seq_len_q);
+        float inv_l0 = ok0 ? (1.0f / s_l[r0]) : 0.0f;
+        float inv_l1 = ok1 ? (1.0f / s_l[r1]) : 0.0f;
+        for (int dvc = 0; dvc < dv_chunks_per_warp_o; dvc++) {
+            int dv = dv_start_o + dvc * 16;
+            if (ok0) {
+                out_base[q0 * d_v + dv + c0]         = oacc0[dvc][0] * inv_l0;
+                out_base[q0 * d_v + dv + c0 + 1]     = oacc0[dvc][1] * inv_l0;
+                out_base[q0 * d_v + dv + c0 + 8]     = oacc1[dvc][0] * inv_l0;
+                out_base[q0 * d_v + dv + c0 + 8 + 1] = oacc1[dvc][1] * inv_l0;
+            }
+            if (ok1) {
+                out_base[q1 * d_v + dv + c0]         = oacc0[dvc][2] * inv_l1;
+                out_base[q1 * d_v + dv + c0 + 1]     = oacc0[dvc][3] * inv_l1;
+                out_base[q1 * d_v + dv + c0 + 8]     = oacc1[dvc][2] * inv_l1;
+                out_base[q1 * d_v + dv + c0 + 8 + 1] = oacc1[dvc][3] * inv_l1;
             }
         }
     }
@@ -1095,15 +1132,16 @@ __global__ void cast_f16_to_f32(const __half* __restrict__ in, float* __restrict
 }
 
 static size_t mma_smem_bytes(int64_t d_k, int64_t d_v) {
-    return (size_t)16 * (size_t)d_k * sizeof(__half)
-         + (size_t)16 * 16 * sizeof(__half)
-         + (size_t)2 * 16 * 16 * sizeof(float)
-         + (size_t)2 * 16 * 16 * sizeof(__half)
-         + (size_t)4 * 2 * 16 * 16 * sizeof(float)
-         + (size_t)4 * 2 * 16 * 16 * sizeof(__half)
-         + (size_t)16 * 16 * sizeof(float)
-         + (size_t)16 * (size_t)d_v * sizeof(float)
-         + (size_t)3 * 16 * sizeof(float);
+    // Output accumulators are per-warp register arrays now, so s_o is gone.
+    (void)d_v;
+    return (size_t)16 * (size_t)d_k * sizeof(__half)               // s_q
+         + (size_t)16 * 16 * sizeof(__half)                         // s_p
+         + (size_t)2 * 16 * 16 * sizeof(float)                      // s_kstage
+         + (size_t)2 * 16 * 16 * sizeof(__half)                     // s_kchunk
+         + (size_t)4 * 2 * 16 * 16 * sizeof(float)                  // s_vstage [4 warps]
+         + (size_t)4 * 2 * 16 * 16 * sizeof(__half)                 // s_vchunk [4 warps]
+         + (size_t)16 * 16 * sizeof(float)                          // s_scores
+         + (size_t)3 * 16 * sizeof(float);                          // s_m, s_l, s_corr
 }
 
 void sdpa_mma_cuda(
