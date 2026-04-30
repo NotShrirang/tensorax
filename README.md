@@ -70,19 +70,30 @@ Tensorax Default           1.18s   1.45x
 NumPy CPU (baseline)       1.71s   1.00x
 ```
 
-Attention — fp32/fp16, B=4 H=8 S=256 Dk=512 Dv=512, 30 iterations:
+Attention — B=4 H=8 S=256 Dk=512 Dv=512, 30 iterations:
 
 ```
-PyTorch SDPA               0.04s   2480x
-Tensorax MMA Tensor Core   0.16s    565x  <- best
-Tensorax Optim. Flash      0.41s    227x
-Tensorax Flash SDPA        2.92s     32x
-NumPy CPU (baseline)       6.36s     15x
-Tensorax Tiled SDPA       31.25s      3x
-Tensorax Naive SDPA       92.71s      1x
+Tensorax MMA fp16          0.14s    644x  <- best (1.37 TFLOPS)
+PyTorch SDPA fp32          0.04s   2415x  (5.15 TFLOPS, internal TF32)
+Tensorax MMA fp32          0.30s    301x  (0.64 TFLOPS)
+Tensorax Optim. Flash      0.45s    201x  (0.43 TFLOPS)
+Tensorax Flash SDPA        2.93s     31x
+NumPy CPU (baseline)       5.47s     17x
+Tensorax Tiled SDPA       32.79s      3x
+Tensorax Naive SDPA       90.47s      1x
 ```
 
-The MMA kernel achieves a 41x speedup over the flash kernel by dropping into inline PTX to use `mma.sync` Ampere Tensor Core instructions and SFU fast-math intrinsics, with the fp32↔fp16 casts fused directly into the kernel's shared-memory load/store path (eliminates 4 cast launches per call). Still ~4.4x behind PyTorch's heavily optimized SDPA — closing that gap is ongoing work.
+The MMA kernel uses inline PTX `mma.sync.aligned.m16n8k16` Tensor Core instructions
+with online softmax (FA-style), `cp.async` double-buffered K/V streaming with
+overlap across kv-tile boundaries, 4-warp-tiled PV split along d_v, and
+register-resident output accumulators (no smem traffic for O between tiles).
+
+The fp16 path takes pre-cast fp16 Q/K/V (matching how a real KV cache feeds an
+inference workload) and skips the per-tile fp32→fp16 cast pass, giving a clean
+~2.1× speedup over the fp32-input variant. Still ~3.5× behind PyTorch's fp32
+SDPA (which dispatches to cuDNN's fused-attention path with multi-warp 64-row
+tiles and a tuned schedule we haven't implemented yet) — closing that gap is
+ongoing work; tracked in `ROADMAP.md`.
 
 ## Project layout
 

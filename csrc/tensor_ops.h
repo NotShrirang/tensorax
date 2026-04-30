@@ -22,10 +22,19 @@ namespace tensorax
 
         TensorImpl(const std::vector<float> &data, const std::vector<int64_t> &shape,
                    const std::string &dtype, const std::string &device);
+        TensorImpl(const std::vector<int64_t> &shape,
+                   const std::string &dtype, const std::string &device);
         ~TensorImpl();
 
         std::vector<float> to_vector() const;
     };
+
+    TensorHandle cast_to_fp16(const TensorHandle &src);
+
+    TensorHandle scaled_dot_product_attention_mma_fp16(
+        const TensorHandle &query,
+        const TensorHandle &key,
+        const TensorHandle &value);
 
     TensorHandle create_tensor_cpu(const std::vector<float> &data,
                                    const std::vector<int64_t> &shape,
@@ -170,6 +179,12 @@ namespace tensorax
     void sdpa_mma_cuda(const float *Q, const float *K, const float *V, const float *mask,
                        float *out, int64_t batch_size, int64_t num_heads,
                        int64_t seq_len_q, int64_t seq_len_k, int64_t d_k, int64_t d_v);
+
+    void sdpa_mma_fp16_cuda(const void *Q_h, const void *K_h, const void *V_h,
+                            float *out, int64_t batch_size, int64_t num_heads,
+                            int64_t seq_len_q, int64_t seq_len_k, int64_t d_k, int64_t d_v);
+
+    void cast_f32_to_f16_cuda(const float *in, void *out, int64_t size);
 
     void sdpa_optimized_flash_cuda(const float *Q, const float *K, const float *V, const float *mask,
                                   float *out, int64_t batch_size, int64_t num_heads,

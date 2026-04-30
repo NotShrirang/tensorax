@@ -41,6 +41,26 @@ namespace tensorax
         }
     }
 
+    TensorImpl::TensorImpl(const std::vector<int64_t> &input_shape,
+                           const std::string &input_dtype,
+                           const std::string &input_device)
+        : shape(input_shape), dtype(input_dtype), device(input_device)
+    {
+        size = 1;
+        for (auto dim : shape) size *= dim;
+        size_t elem_bytes = (dtype == "float16" || dtype == "half") ? 2 : 4;
+        size_t bytes = (size_t)size * elem_bytes;
+        if (device == "cuda") {
+#ifdef WITH_CUDA
+            data = static_cast<float *>(cuda_malloc(bytes));
+#else
+            throw std::runtime_error("CUDA support not compiled");
+#endif
+        } else {
+            data = reinterpret_cast<float *>(new char[bytes]);
+        }
+    }
+
     TensorImpl::~TensorImpl()
     {
         if (device == "cuda")
@@ -51,7 +71,7 @@ namespace tensorax
         }
         else
         {
-            delete[] data;
+            delete[] reinterpret_cast<char *>(data);
         }
     }
 
@@ -974,6 +994,58 @@ namespace tensorax
         return result;
     }
 
+    TensorHandle cast_to_fp16(const TensorHandle &src)
+    {
+        if (src->dtype == "float16") return src;
+        if (src->device != "cuda")
+            throw std::runtime_error("cast_to_fp16: only CUDA tensors supported");
+#ifdef WITH_CUDA
+        auto dst = std::make_shared<TensorImpl>(src->shape, std::string("float16"), std::string("cuda"));
+        cast_f32_to_f16_cuda(src->data, dst->data, src->size);
+        return dst;
+#else
+        throw std::runtime_error("CUDA support not compiled");
+#endif
+    }
+
+    TensorHandle scaled_dot_product_attention_mma_fp16(
+        const TensorHandle &query,
+        const TensorHandle &key,
+        const TensorHandle &value)
+    {
+        if (query->shape.size() != 4 || key->shape.size() != 4 || value->shape.size() != 4)
+            throw std::runtime_error("SDPA fp16: Q, K, V must be 4D tensors");
+        if (query->device != "cuda" || key->device != "cuda" || value->device != "cuda")
+            throw std::runtime_error("SDPA fp16: all tensors must be on CUDA");
+        if (query->dtype != "float16" || key->dtype != "float16" || value->dtype != "float16")
+            throw std::runtime_error("SDPA fp16: all inputs must have dtype float16");
+
+        int64_t batch_size = query->shape[0];
+        int64_t num_heads  = query->shape[1];
+        int64_t seq_len_q  = query->shape[2];
+        int64_t d_k        = query->shape[3];
+        int64_t seq_len_k  = key->shape[2];
+        int64_t d_v        = value->shape[3];
+
+        if (key->shape[0] != batch_size || key->shape[1] != num_heads || key->shape[3] != d_k)
+            throw std::runtime_error("SDPA fp16: Key dimensions don't match Query");
+        if (value->shape[0] != batch_size || value->shape[1] != num_heads || value->shape[2] != seq_len_k)
+            throw std::runtime_error("SDPA fp16: Value dimensions don't match Key");
+
+        std::vector<int64_t> output_shape = {batch_size, num_heads, seq_len_q, d_v};
+        auto result = std::make_shared<TensorImpl>(
+            output_shape, std::string("float32"), std::string("cuda"));
+
+#ifdef WITH_CUDA
+        sdpa_mma_fp16_cuda(query->data, key->data, value->data,
+                           result->data, batch_size, num_heads,
+                           seq_len_q, seq_len_k, d_k, d_v);
+#else
+        throw std::runtime_error("CUDA support not compiled");
+#endif
+        return result;
+    }
+
     TensorHandle scaled_dot_product_attention_flash(
         const TensorHandle &query,
         const TensorHandle &key,
@@ -1459,6 +1531,11 @@ PYBIND11_MODULE(_C, m)
     m.def("scaled_dot_product_attention_mma", &tensorax::scaled_dot_product_attention_mma,
           py::arg("query"), py::arg("key"), py::arg("value"), py::arg("mask") = nullptr,
           "Scaled Dot-Product Attention (MMA Tensor Core kernel)");
+    m.def("scaled_dot_product_attention_mma_fp16", &tensorax::scaled_dot_product_attention_mma_fp16,
+          py::arg("query"), py::arg("key"), py::arg("value"),
+          "Scaled Dot-Product Attention (MMA Tensor Core, fp16 inputs, fp32 output)");
+    m.def("cast_to_fp16", &tensorax::cast_to_fp16, py::arg("tensor"),
+          "Cast a fp32 CUDA tensor to fp16 (returns a new tensor with dtype='float16')");
     m.def("scaled_dot_product_attention_flash_optimized", &tensorax::scaled_dot_product_attention_flash_optimized,
             py::arg("query"), py::arg("key"), py::arg("value"), py::arg("mask") = nullptr,
             "Scaled Dot-Product Attention (optimized flash attention kernel)");

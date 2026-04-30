@@ -362,5 +362,46 @@ def scaled_dot_product_attention_flash(query: Tensor, key: Tensor, value: Tensor
 def scaled_dot_product_attention_mma(query: Tensor, key: Tensor, value: Tensor, mask: Optional[Tensor] = None) -> Tensor:
     return _sdpa_variant(query, key, value, mask, _C.scaled_dot_product_attention_mma)
 
+
+def cast_to_fp16(tensor: Tensor) -> Tensor:
+    if tensor.dtype == "float16":
+        return tensor
+    if tensor.device != "cuda":
+        raise ValueError("cast_to_fp16: only CUDA tensors supported")
+    out = Tensor.__new__(Tensor)
+    out._c_tensor = _C.cast_to_fp16(tensor._c_tensor)
+    out._shape = tuple(tensor.shape)
+    out._size = tensor._size
+    out.dtype = "float16"
+    out.device = "cuda"
+    out.grad = None
+    out.requires_grad = False
+    out._grad_fn = None
+    return out
+
+
+def scaled_dot_product_attention_mma_fp16(query: Tensor, key: Tensor, value: Tensor) -> Tensor:
+    if len(query.shape) != 4 or len(key.shape) != 4 or len(value.shape) != 4:
+        raise ValueError("Q, K, V must be 4D tensors [batch, heads, seq_len, d]")
+    if query.dtype != "float16" or key.dtype != "float16" or value.dtype != "float16":
+        raise ValueError("scaled_dot_product_attention_mma_fp16: inputs must be float16 (use F.cast_to_fp16)")
+
+    batch_size = query.shape[0]
+    num_heads  = query.shape[1]
+    seq_len_q  = query.shape[2]
+    d_v        = value.shape[3]
+
+    result = Tensor.__new__(Tensor)
+    result._shape = (batch_size, num_heads, seq_len_q, d_v)
+    result._size = batch_size * num_heads * seq_len_q * d_v
+    result.dtype = "float32"
+    result.device = "cuda"
+    result.grad = None
+    result.requires_grad = False
+    result._grad_fn = None
+    result._c_tensor = _C.scaled_dot_product_attention_mma_fp16(
+        query._c_tensor, key._c_tensor, value._c_tensor)
+    return result
+
 def scaled_dot_product_attention_flash_optimized(query: Tensor, key: Tensor, value: Tensor, mask: Optional[Tensor] = None) -> Tensor:
     return _sdpa_variant(query, key, value, mask, _C.scaled_dot_product_attention_flash_optimized)
