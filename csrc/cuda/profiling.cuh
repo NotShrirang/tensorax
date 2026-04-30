@@ -3,9 +3,19 @@
 #include <cstdint>
 #include <vector>
 #include <cuda_runtime.h>
-#include <nvtx3/nvtx3.hpp>
 
-#define TENSORAX_NVTX_RANGE(name) ::nvtx3::scoped_range _tx_nvtx_range_{(name)}
+#if defined(__has_include)
+#  if __has_include(<nvtx3/nvtx3.hpp>)
+#    include <nvtx3/nvtx3.hpp>
+#    define TENSORAX_HAS_NVTX 1
+#  endif
+#endif
+
+#ifdef TENSORAX_HAS_NVTX
+#  define TENSORAX_NVTX_RANGE(name) ::nvtx3::scoped_range _tx_nvtx_range_{(name)}
+#else
+#  define TENSORAX_NVTX_RANGE(name) ((void)0)
+#endif
 
 #ifdef TENSORAX_PROFILE
   #define TX_TICK(buf, idx)                                                   \
