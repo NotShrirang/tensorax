@@ -71,32 +71,38 @@ Tensorax Default           1.25s   1.6x
 NumPy CPU (baseline)       2.03s   1.0x
 ```
 
-Attention — B=4 H=8 S=256 Dk=512 Dv=512, 30 iterations:
+Attention — B=4 H=8 S=256 Dk=512 Dv=512, fp16 inputs, 100 iterations:
 
 ```
-Tensorax MMA fp16          0.12s    736x  <- best (1.59 TFLOPS)
-PyTorch SDPA fp32          0.04s   2415x  (5.15 TFLOPS, internal TF32)
-Tensorax MMA fp32          0.30s    301x  (0.64 TFLOPS)
-Tensorax Optim. Flash      0.45s    201x  (0.43 TFLOPS)
-Tensorax Flash SDPA        2.93s     31x
-NumPy CPU (baseline)       5.47s     17x
-Tensorax Tiled SDPA       32.79s      3x
-Tensorax Naive SDPA       90.47s      1x
+PyTorch SDPA fp16          0.10s   3.5x  (4.10 TFLOPS, cuDNN)
+Tensorax MMA fp16          0.37s   1.0x  <- best tensorax (1.17 TFLOPS)
 ```
 
-The MMA kernel uses inline PTX `mma.sync.aligned.m16n8k16` Tensor Core instructions
-with online softmax (FA-style), `cp.async` double-buffered K/V streaming with
-overlap across kv-tile boundaries, FA-2 split-Q across 4 warps (each warp owns
-16 query rows × full d_v with all warps running QKT in parallel against shared
-K), per-warp register-resident softmax via `__shfl_xor_sync` reductions, and
-register-resident output accumulators (no smem traffic for P or O between tiles).
+Other tensorax variants (30 iterations, baselined to NumPy):
+
+```
+Tensorax MMA fp32          0.30s   18x  (0.64 TFLOPS, fp32 inputs)
+Tensorax Optim. Flash      0.45s   12x  (0.43 TFLOPS)
+Tensorax Flash SDPA        2.93s    2x
+NumPy CPU (baseline)       5.47s    1x
+Tensorax Tiled SDPA       32.79s    -
+Tensorax Naive SDPA       90.47s    -
+```
+
+The MMA fp16 kernel uses inline PTX `mma.sync.aligned.m16n8k16` Tensor Core
+instructions with online softmax (FA-style), `cp.async` double-buffered K/V
+streaming with overlap across kv-tile boundaries, FA-2 split-Q across 4 warps
+(each warp owns 16 query rows × full d_v with all warps running QKT in
+parallel against shared K), per-warp register-resident softmax via
+`__shfl_xor_sync` reductions, lazy output correction (skip the per-row rescale
+pass when the running max barely shifts), and register-resident output
+accumulators (no smem traffic for P or O between tiles).
 
 The fp16 path takes pre-cast fp16 Q/K/V (matching how a real KV cache feeds an
-inference workload) and skips the per-tile fp32→fp16 cast pass, giving a clean
-~2.5× speedup over the fp32-input variant. Still ~3.2× behind PyTorch's fp32
-SDPA (which dispatches to cuDNN's fused-attention path with a tuned schedule we
-haven't implemented yet) — closing that gap is ongoing work; tracked in
-`ROADMAP.md`.
+inference workload) and skips the per-tile fp32→fp16 cast pass. Apples-to-apples
+against PyTorch fp16 SDPA (cuDNN's fused-attention path), tensorax is ~3.5×
+behind — closing that gap is ongoing work; tracked in `ROADMAP.md` and
+`docs/profiling/RESULTS.md`.
 
 ## Project layout
 

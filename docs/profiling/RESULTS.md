@@ -683,9 +683,124 @@ out-of-range Q-row zero-padding path.
 | Step 9 (V[0] preissue)               | 4.8 ms | 1.35 | −1.5 % |
 | Step 10 (K[T+1] pingpong)            | 5.0 ms | 1.27 | −7.3 % |
 | **Step 11 (FA-2 split-Q parallel QKT)** | **4.1 ms** | **1.59** | **+16 %** |
+| **Step 12 (oacc pack + lazy correction)** | **3.7 ms** | **1.76** | **+28 %** |
 | PyTorch fp16 SDPA (cuDNN reference)  | 0.25 ms | 17.3 | — |
 
 Step 11 is the first step in this continuation that produced a real
 gain, and it does so by fixing what was actually wrong with Step 8 —
-not by stacking more cp.async tricks.
+not by stacking more cp.async tricks. Step 12 then attacks the
+register-pressure side of the same diagnosis.
+
+## Step 12 — oacc packing + lazy output correction
+
+After Step 11 the per-warp register footprint is the bottleneck:
+each warp owns 16 rows × full d_v of fp32 output state (256 fp32 /
+lane for `d_v=512`), capping occupancy at 1 CTA / SM. Two
+register-side fixes from the journal's "what to do next":
+
+**Pack `oacc0` and `oacc1` into one array.** The two-array layout was
+an artefact of `mma.sync.m16n8k16` producing N=8 per MMA — running it
+twice gives N=16 in two halves. That's a layout choice, not a memory
+fact: the same 256 fp32 / lane lives in `oacc[MAX_CHUNKS][2][4]` with
+`[2]` being the N-half. Same footprint, but a single indexable array
+gives the compiler one continuous live range to reason about, and the
+rescale loop (which touches every chunk by the same per-row corr) is
+now a single pass over one array.
+
+**Lazy output correction.** The rescale loop is `MAX_CHUNKS × 8 = 256`
+register multiplies *per kv-tile* — i.e. proportional to the kv loop,
+not amortised. FA-2's lazy trick: only rescale when `tile_max - row_max
+> threshold` (`SOFTMAX_MAX_UPDATE_THRESHOLD = 0.5`, already in the file
+but only used by `flash_optimized`). The rescale gates per row, since
+the two rows a lane owns (r0 and r1) update independently — so a tile
+that bumps r0 but not r1 only multiplies half the array.
+
+Mathematically safe: `delta < 0.5` means `used_max` lags the true row
+max by ≤0.5, so `p = exp(score - used_max)` is bounded by `exp(0.5) ≈
+1.65`. The softmax denominator `l` carries the same bias and cancels
+it at the final divide.
+
+**Result** (B=4, H=8, Sq=Sk=256, Dk=Dv=512, fp16, 100-run wall time,
+median of 5 invocations): **3.7 ms / 1.17 TFLOPS** (new bench formula)
+≈ **1.76 TFLOPS** in the old `4·B·H·S²·Dk + 2·B·H·S²·Dv` formula.
+**+11 % time reduction over Step 11**, **+28 % vs Step 7** baseline.
+
+Validation: max abs error vs PyTorch fp16 SDPA holds at ~3-4e-4 across
+`{Sq,Sk} ∈ {64, 80, 256}`, `{Dk,Dv} ∈ {64, 128, 512}` — the threshold
+introduces no measurable degradation at fp16.
+
+(Note: the benchmark's TFLOPS formula changed mid-stream from
+`4·B·H·S²·Dk + 2·B·H·S²·Dv` to `2·B·H·S²·(Dk+Dv)`. The numbers in
+this table use the *original* formula consistently for comparability;
+the new-formula reading for Step 12 is 1.17 TFLOPS.)
+
+## Step 12 postscript — `ptxas -v` says the register diagnosis was wrong
+
+After Step 12 I ran `nvcc -Xptxas=-v` on the kernel to confirm the
+"freed enough registers for 2 CTAs/SM" intent. Result:
+
+```
+sdpa_kernel_mma_fp16:
+  40 registers / thread
+  1024 bytes stack frame, 0 spill stores, 0 spill loads
+  1 barrier, 412 bytes cmem[0]
+```
+
+Three corrections to the writeup above:
+
+1. **`oacc` is not in registers — it's in local memory.** The 1024 B
+   stack frame is exactly `oacc[32][2][4] × sizeof(float)`. ptxas
+   demoted it to a stack-allocated array (cached in L1) because the
+   PV loop indexes `oacc[dvc][...]` with a runtime variable. Without
+   `#pragma unroll` on the `dvc` loop, the compiler can't pin each
+   slot to a fixed register, so it falls back to a local array.
+
+2. **Register count is not the occupancy limiter at this workload.**
+   Used: 40 regs / thread × 128 threads = 5120 regs / CTA, vs sm_86's
+   65536 regs / SM (~12 CTAs / SM if it were the limit). We're at 1
+   CTA / SM because of **smem**: at `d_k = d_v = 512`, `s_q` alone is
+   `64 × 512 × 2 B = 64 KB`, plus K/V staging — total ~68 KB / CTA on
+   a 100 KB / SM part. That's a smem cap, not a register cap.
+
+3. **Step 12's win is real but mislabelled in mechanism.** The
+   "256 fp32 / lane register multiplies per kv-tile" was actually
+   256 local-memory load/multiply/store ops against L1 — not register
+   ALU. The lazy-correction threshold cut **L1 traffic** on the
+   rescale, which is why the wall-time improvement landed; the same
+   gain doesn't help register pressure (since there wasn't any).
+
+The earlier journal sections (Step 8 onward) made the same misread
+when they cited "150 regs / thread total" and "1 CTA / SM from
+registers" — neither was measured with `-Xptxas=-v`, both were
+register-pressure inferences from array sizes. Should have run ptxas
+in Step 5.
+
+## What I'd actually do next (post-Step 12, corrected)
+
+1. **Cut `s_q` smem.** The 64 KB `s_q` is the dominant CTA-resident
+   footprint. Two ways:
+   - **Stream Q like K**: re-load Q's `d_k` slice per kv-tile, so
+     smem holds only `64 × 16 × 2 = 2 KB` at a time. Doubles Q
+     bandwidth (Q is loaded `seq_len_k / 16` times instead of once),
+     but for `Sk=256` that's 16×, bandwidth-cheap if it buys 2-4
+     CTAs / SM.
+   - **Halve Q_ROWS to 32** (2 warps × 16 rows): cuts `s_q` to
+     32 KB and halves PV register cost. Trades half the QKT
+     parallelism — but if the PV phase is L1-bound (which it
+     looks like, since oacc is in local memory), this might help.
+2. **Pin `oacc` into actual registers.** `#pragma unroll` on the
+   `dvc` loop forces ptxas to fix each slot to a register — but only
+   feasible if total fp32 stays under ~200 regs / thread. Works for
+   `d_v ≤ 128` (8 chunks → 64 fp32 / lane); won't work for
+   `d_v = 512` (32 chunks → 256 fp32 / lane, would spill). Worth a
+   `d_v`-templated kernel split: a "register-resident" path for
+   `d_v ≤ 128` and the current "local-memory-resident" path for
+   larger d_v.
+3. **Larger `d_k` chunk (32 instead of 16).** Halves `dk_chunks`
+   and the inner-loop `__syncthreads` count. Costs another
+   `s_kchunk` slot in smem (~1 KB) — affordable.
+4. **Persistent CTA scheduling.** Step 11 cut the grid 4×; persistent
+   kernels would amortize launch overhead across tiles.
+5. **fp16 PV accumulator.** Halves `oacc`'s local-memory footprint.
+   Numerically risky across many kv tiles; do last.
 

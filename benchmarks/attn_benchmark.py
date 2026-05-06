@@ -6,9 +6,8 @@ import torch
 import tensorax as ts
 import tensorax.functional as F
 
-
 _ALL_NAMES = ["naive", "tiled", "flash", "mma", "mma_fp16",
-              "flash_optimized", "numpy", "pytorch"]
+              "flash_optimized", "numpy", "pytorch", "pytorch_fp16"]
 
 _parser = argparse.ArgumentParser(
     description="SDPA benchmark. By default runs every variant; use --only to "
@@ -52,6 +51,10 @@ q_torch = torch.randn((batch, heads, seq_len, d_k), device='cuda', dtype=torch.f
 k_torch = torch.randn((batch, heads, seq_len, d_k), device='cuda', dtype=torch.float32)
 v_torch = torch.randn((batch, heads, seq_len, d_v), device='cuda', dtype=torch.float32)
 
+q_torch_fp16 = q_torch.half()
+k_torch_fp16 = k_torch.half()
+v_torch_fp16 = v_torch.half()
+
 q_t = ts.Tensor(q_torch.cpu().numpy(), dtype='float32', device='cuda')
 k_t = ts.Tensor(k_torch.cpu().numpy(), dtype='float32', device='cuda')
 v_t = ts.Tensor(v_torch.cpu().numpy(), dtype='float32', device='cuda')
@@ -81,6 +84,13 @@ def sdpa_flash():
     torch.cuda.synchronize()
     return c
 
+# Benchmarking optimized flash SDPA
+def sdpa_flash_optimized():
+    torch.cuda.synchronize()
+    c = F.scaled_dot_product_attention_flash_optimized(q_t, k_t, v_t)
+    torch.cuda.synchronize()
+    return c
+
 # Benchmarking MMA SDPA
 def sdpa_mma():
     torch.cuda.synchronize()
@@ -95,13 +105,6 @@ v_h = F.cast_to_fp16(v_t)
 def sdpa_mma_fp16():
     torch.cuda.synchronize()
     c = F.scaled_dot_product_attention_mma_fp16(q_h, k_h, v_h)
-    torch.cuda.synchronize()
-    return c
-
-# Benchmarking optimized flash SDPA
-def sdpa_flash_optimized():
-    torch.cuda.synchronize()
-    c = F.scaled_dot_product_attention_flash_optimized(q_t, k_t, v_t)
     torch.cuda.synchronize()
     return c
 
@@ -121,21 +124,39 @@ def sdpa_pytorch():
     torch.cuda.synchronize()
     return c
 
-def compute_tflops(time_sec, batch, heads, seq_len, d_k, d_v, times):
-    # Total FLOPs for one SDPA run: 4 * B * H * S^2 * Dk + 2 * B * H * S^2 * Dv
-    total_flops = (4 * batch * heads * seq_len**2 * d_k) + (2 * batch * heads * seq_len**2 * d_v)
-    tflops = (total_flops * times) / (time_sec * 1e12)
-    return tflops
+# Benchmarking PyTorch SDPA in FP16
+def sdpa_pytorch_fp16():
+    torch.cuda.synchronize()
+    c = torch.nn.functional.scaled_dot_product_attention(q_torch_fp16, k_torch_fp16, v_torch_fp16)
+    torch.cuda.synchronize()
+    return c
+
+def compute_metrics(time_sec, batch, heads, seq_len, d_k, d_v, times, is_fp16=False):
+    time_per_run = time_sec / times
+
+    total_flops = 2 * batch * heads * seq_len**2 * (d_k + d_v)
+    tflops = total_flops / (time_per_run * 1e12)
+
+    total_elements = batch * heads * seq_len * (2 * d_k + 2 * d_v)
+
+    dtype_size = 2 if is_fp16 else 4 
+    total_bytes = total_elements * dtype_size
+
+    gbps = total_bytes / (time_per_run * 1e9)
+    ai = total_flops / total_bytes
+
+    return tflops, gbps, ai
 
 _BENCHMARKS = {
-    "naive":           ("Naive SDPA",           sdpa_naive),
-    "tiled":           ("Tiled SDPA",           sdpa_tiled),
-    "flash":           ("Flash SDPA",           sdpa_flash),
+    "naive":           ("Naive SDPA",            sdpa_naive),
+    "tiled":           ("Tiled SDPA",            sdpa_tiled),
+    "flash":           ("Flash SDPA",            sdpa_flash),
     "flash_optimized": ("Optimized Flash SDPA", sdpa_flash_optimized),
-    "mma":             ("MMA SDPA",             sdpa_mma),
-    "mma_fp16":        ("MMA SDPA fp16",        sdpa_mma_fp16),
-    "numpy":           ("Numpy SDPA",           sdpa_numpy),
-    "pytorch":         ("PyTorch SDPA",         sdpa_pytorch),
+    "mma":             ("MMA SDPA",              sdpa_mma),
+    "mma_fp16":        ("MMA SDPA fp16",         sdpa_mma_fp16),
+    "numpy":           ("Numpy SDPA",            sdpa_numpy),
+    "pytorch":         ("PyTorch SDPA",          sdpa_pytorch),
+    "pytorch_fp16":    ("PyTorch SDPA fp16",     sdpa_pytorch_fp16),
 }
 
 if not _args.quiet:
@@ -151,8 +172,13 @@ print(f"Starting benchmarks... (B={batch}, H={heads}, S={seq_len}, Dk={d_k}, Dv=
 for _name in _ALL_NAMES:
     if _name not in _selected:
         continue
+    
     _label, _fn = _BENCHMARKS[_name]
     _t = timeit.timeit(_fn, number=times)
-    _tflops = compute_tflops(_t, batch, heads, seq_len, d_k, d_v, times)
-    print(f"{_label} time over {times} runs: {_t} seconds | "
-          f"Time per run: {_t / times:.4f} seconds | TFLOPS: {_tflops:.2f}")
+    
+    _is_fp16 = "fp16"
+    _tflops, _gbps, _ai = compute_metrics(_t, batch, heads, seq_len, d_k, d_v, times, is_fp16=_is_fp16)
+    
+    print(f"{_label} time over {times} runs: {_t:.4f}s | "
+          f"Per run: {_t / times:.4f}s | "
+          f"TFLOPS: {_tflops:.2f} | GB/s: {_gbps:.2f} | AI: {_ai:.1f}")

@@ -1193,13 +1193,14 @@ __global__ void sdpa_kernel_mma_fp16(
         }
     }
 
-    constexpr int MAX_CHUNKS = 32; // bounds d_v / 16 (each warp owns full d_v)
-    float oacc0[MAX_CHUNKS][4];
-    float oacc1[MAX_CHUNKS][4];
+    constexpr int MAX_CHUNKS = 32;
+    float oacc[MAX_CHUNKS][2][4];
     #pragma unroll
     for (int i = 0; i < MAX_CHUNKS; i++) {
-        oacc0[i][0] = oacc0[i][1] = oacc0[i][2] = oacc0[i][3] = 0.0f;
-        oacc1[i][0] = oacc1[i][1] = oacc1[i][2] = oacc1[i][3] = 0.0f;
+        #pragma unroll
+        for (int n = 0; n < 2; n++) {
+            oacc[i][n][0] = oacc[i][n][1] = oacc[i][n][2] = oacc[i][n][3] = 0.0f;
+        }
     }
     __syncthreads();
 
@@ -1282,10 +1283,12 @@ __global__ void sdpa_kernel_mma_fp16(
         lane_max_r1 = fmaxf(lane_max_r1, __shfl_xor_sync(FULL_WARP_MASK, lane_max_r1, 1));
         lane_max_r1 = fmaxf(lane_max_r1, __shfl_xor_sync(FULL_WARP_MASK, lane_max_r1, 2));
 
-        float new_m_r0 = fmaxf(m_r0, lane_max_r0);
-        float new_m_r1 = fmaxf(m_r1, lane_max_r1);
-        float corr_r0  = exp_approx(m_r0 - new_m_r0);
-        float corr_r1  = exp_approx(m_r1 - new_m_r1);
+        bool update_r0 = (lane_max_r0 - m_r0) > SOFTMAX_MAX_UPDATE_THRESHOLD;
+        bool update_r1 = (lane_max_r1 - m_r1) > SOFTMAX_MAX_UPDATE_THRESHOLD;
+        float new_m_r0 = update_r0 ? lane_max_r0 : m_r0;
+        float new_m_r1 = update_r1 ? lane_max_r1 : m_r1;
+        float corr_r0  = update_r0 ? exp_approx(m_r0 - new_m_r0) : 1.0f;
+        float corr_r1  = update_r1 ? exp_approx(m_r1 - new_m_r1) : 1.0f;
 
         acc[0][0] = exp_approx(acc[0][0] - new_m_r0);
         acc[0][1] = exp_approx(acc[0][1] - new_m_r0);
@@ -1308,20 +1311,25 @@ __global__ void sdpa_kernel_mma_fp16(
         l_r0 = l_r0 * corr_r0 + sum_r0;
         l_r1 = l_r1 * corr_r1 + sum_r1;
 
-        #pragma unroll
-        for (int i = 0; i < MAX_CHUNKS; i++) {
-            oacc0[i][0] *= corr_r0;
-            oacc0[i][1] *= corr_r0;
-            oacc0[i][2] *= corr_r1;
-            oacc0[i][3] *= corr_r1;
-            oacc1[i][0] *= corr_r0;
-            oacc1[i][1] *= corr_r0;
-            oacc1[i][2] *= corr_r1;
-            oacc1[i][3] *= corr_r1;
+        if (update_r0) {
+            #pragma unroll
+            for (int i = 0; i < MAX_CHUNKS; i++) {
+                oacc[i][0][0] *= corr_r0;
+                oacc[i][0][1] *= corr_r0;
+                oacc[i][1][0] *= corr_r0;
+                oacc[i][1][1] *= corr_r0;
+            }
+        }
+        if (update_r1) {
+            #pragma unroll
+            for (int i = 0; i < MAX_CHUNKS; i++) {
+                oacc[i][0][2] *= corr_r1;
+                oacc[i][0][3] *= corr_r1;
+                oacc[i][1][2] *= corr_r1;
+                oacc[i][1][3] *= corr_r1;
+            }
         }
 
-        // MMA m16n8k16 C-output layout matches the A-operand layout when
-        // c0 = k0 = (lane%4)*2, so P packs straight from acc into reg_p.
         uint32_t reg_p[4];
         {
             __half2 h0 = __floats2half2_rn(acc[0][0], acc[0][1]);
@@ -1367,8 +1375,8 @@ __global__ void sdpa_kernel_mma_fp16(
             ldmatrix_m16n8_x2_b16(reg_v0, s_vchunk + cur_buf * 256 +  b_col      * 16 + b_khalf);
             ldmatrix_m16n8_x2_b16(reg_v1, s_vchunk + cur_buf * 256 + (b_col + 8) * 16 + b_khalf);
 
-            mma_m16n8k16_fp32_fp16_fp16_fp32(oacc0[dvc], reg_p, reg_v0, oacc0[dvc]);
-            mma_m16n8k16_fp32_fp16_fp16_fp32(oacc1[dvc], reg_p, reg_v1, oacc1[dvc]);
+            mma_m16n8k16_fp32_fp16_fp16_fp32(oacc[dvc][0], reg_p, reg_v0, oacc[dvc][0]);
+            mma_m16n8k16_fp32_fp16_fp16_fp32(oacc[dvc][1], reg_p, reg_v1, oacc[dvc][1]);
         }
 
         if (warp_id == 0 && kv_start + 16 < seq_len_k) {
@@ -1388,16 +1396,16 @@ __global__ void sdpa_kernel_mma_fp16(
         for (int dvc = 0; dvc < dv_chunks; dvc++) {
             int dv = dvc * 16;
             if (ok0) {
-                out_base[q0 * d_v + dv + c0]         = oacc0[dvc][0] * inv_l0;
-                out_base[q0 * d_v + dv + c0 + 1]     = oacc0[dvc][1] * inv_l0;
-                out_base[q0 * d_v + dv + c0 + 8]     = oacc1[dvc][0] * inv_l0;
-                out_base[q0 * d_v + dv + c0 + 8 + 1] = oacc1[dvc][1] * inv_l0;
+                out_base[q0 * d_v + dv + c0]         = oacc[dvc][0][0] * inv_l0;
+                out_base[q0 * d_v + dv + c0 + 1]     = oacc[dvc][0][1] * inv_l0;
+                out_base[q0 * d_v + dv + c0 + 8]     = oacc[dvc][1][0] * inv_l0;
+                out_base[q0 * d_v + dv + c0 + 8 + 1] = oacc[dvc][1][1] * inv_l0;
             }
             if (ok1) {
-                out_base[q1 * d_v + dv + c0]         = oacc0[dvc][2] * inv_l1;
-                out_base[q1 * d_v + dv + c0 + 1]     = oacc0[dvc][3] * inv_l1;
-                out_base[q1 * d_v + dv + c0 + 8]     = oacc1[dvc][2] * inv_l1;
-                out_base[q1 * d_v + dv + c0 + 8 + 1] = oacc1[dvc][3] * inv_l1;
+                out_base[q1 * d_v + dv + c0]         = oacc[dvc][0][2] * inv_l1;
+                out_base[q1 * d_v + dv + c0 + 1]     = oacc[dvc][0][3] * inv_l1;
+                out_base[q1 * d_v + dv + c0 + 8]     = oacc[dvc][1][2] * inv_l1;
+                out_base[q1 * d_v + dv + c0 + 8 + 1] = oacc[dvc][1][3] * inv_l1;
             }
         }
     }
