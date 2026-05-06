@@ -26,15 +26,21 @@ def time_call(fn, iters, warmup=3):
 
 
 def iters_for(S, d):
-    if S >= 8192 or (S >= 4096 and d >= 256):
-        return 3
-    if S >= 4096 or (S >= 2048 and d >= 256):
-        return 5
-    if S >= 2048:
+    # Bumped: 3-iter runs at S>=4096 were noisy enough that single sweep
+    # numbers misled on parity claims. Trade longer wall time for stable means.
+    if S >= 8192 and d >= 256:
         return 10
+    if S >= 8192:
+        return 30
+    if S >= 4096 and d >= 256:
+        return 15
+    if S >= 4096:
+        return 50
+    if S >= 2048:
+        return 50
     if S >= 1024:
-        return 20
-    return 50
+        return 50
+    return 100
 
 
 def _intlist(s):

@@ -1175,13 +1175,22 @@ __global__ void sdpa_kernel_mma_fp16(
     float* out_base      = out + qkv_base * seq_len_q * d_v;
 
     constexpr int K_CHUNK_W = 32;
+    // Pad each smem row by 8 fp16 (16 B) so the row stride isn't a multiple of
+    // 32 banks × 4 B = 128 B. Without this, ldmatrix gathering 8/16 different
+    // rows hits the same bank wave and serializes (ncu showed ~11-way conflict
+    // on 78% of shared loads). With +8 padding the bank shift per row becomes
+    // 4 (mod 32), dropping the worst case to 2-way over 16 lanes.
+    constexpr int SMEM_ROW_PAD = 8;
+    constexpr int K_STRIDE     = K_CHUNK_W + SMEM_ROW_PAD;  // 40
+    constexpr int V_STRIDE     = 16        + SMEM_ROW_PAD;  // 24
+    const int     q_stride     = d_k       + SMEM_ROW_PAD;
+
     extern __shared__ __half mma_smem[];
     __half* s_q       = mma_smem;
-    __half* s_kchunk  = s_q + Q_ROWS * d_k;
-    __half* s_vstage  = s_kchunk + 2 * 16 * K_CHUNK_W;
+    __half* s_kchunk  = s_q + Q_ROWS * q_stride;
+    __half* s_vstage  = s_kchunk + 2 * 16 * K_STRIDE;
     // V is read directly from s_vstage via ldmatrix.x2.trans (transposes the
-    // 8×8 tiles in-flight). The old s_vchunk col-major buffer + transpose pass
-    // are gone.
+    // 8×8 tiles in-flight).
 
     int r0         = lane / 4;
     int r1         = r0 + 8;
@@ -1198,14 +1207,14 @@ __global__ void sdpa_kernel_mma_fp16(
         int row = lane / 2;
         int col_lo = (lane % 2) * 8;
         int col_hi = col_lo + 16;
-        __half* dst_base = s_kchunk + buf * (16 * K_CHUNK_W) + row * K_CHUNK_W;
+        __half* dst_base = s_kchunk + buf * (16 * K_STRIDE) + row * K_STRIDE;
         cp_async_16B(dst_base + col_lo, k_ptr + (kv_start + row) * d_k + dk + col_lo);
         cp_async_16B(dst_base + col_hi, k_ptr + (kv_start + row) * d_k + dk + col_hi);
     };
     auto issue_v_chunk = [&] (int kv_start, int dv, int buf) {
         int k = lane / 2;
         int n = (lane % 2) * 8;
-        cp_async_16B(s_vstage + buf * 256 + k * 16 + n,
+        cp_async_16B(s_vstage + buf * (16 * V_STRIDE) + k * V_STRIDE + n,
                      v_ptr + (kv_start + k) * d_v + dv + n);
     };
 
@@ -1223,7 +1232,7 @@ __global__ void sdpa_kernel_mma_fp16(
             int row = idx / d_k;
             int col = idx % d_k;
             bool in_range = (q_start + row) < seq_len_q;
-            float4* dst = reinterpret_cast<float4*>(s_q + row * d_k + col);
+            float4* dst = reinterpret_cast<float4*>(s_q + row * q_stride + col);
             if (in_range) {
                 float4 raw = *reinterpret_cast<const float4*>(q_base + (q_start + row) * d_k + col);
                 __half2* h = reinterpret_cast<__half2*>(&raw);
@@ -1286,11 +1295,11 @@ __global__ void sdpa_kernel_mma_fp16(
                 uint32_t reg_k0[2];
                 uint32_t reg_k1[2];
                 ldmatrix_m16n8_x4_b16(reg_q,
-                    s_q + (q_row_off + smem_row_a) * d_k + dk_half + smem_col_a);
+                    s_q + (q_row_off + smem_row_a) * q_stride + dk_half + smem_col_a);
                 ldmatrix_m16n8_x2_b16(reg_k0,
-                    s_kchunk + cur_buf * (16 * K_CHUNK_W) +  b_col      * K_CHUNK_W + kchunk_col_off + b_khalf);
+                    s_kchunk + cur_buf * (16 * K_STRIDE) +  b_col      * K_STRIDE + kchunk_col_off + b_khalf);
                 ldmatrix_m16n8_x2_b16(reg_k1,
-                    s_kchunk + cur_buf * (16 * K_CHUNK_W) + (b_col + 8) * K_CHUNK_W + kchunk_col_off + b_khalf);
+                    s_kchunk + cur_buf * (16 * K_STRIDE) + (b_col + 8) * K_STRIDE + kchunk_col_off + b_khalf);
                 mma_m16n8k16_fp32_fp16_fp16_fp32(acc[0], reg_q, reg_k0, acc[0]);
                 mma_m16n8k16_fp32_fp16_fp16_fp32(acc[1], reg_q, reg_k1, acc[1]);
             }
@@ -1396,8 +1405,8 @@ __global__ void sdpa_kernel_mma_fp16(
             // the row-major source. Two tiles (for x2) are stacked vertically
             // in K, so lane t indexes V[t][col_offset]. reg_v0 covers N=0..7,
             // reg_v1 covers N=8..15.
-            ldmatrix_m16n8_x2_trans_b16(reg_v0, s_vstage + cur_buf * 256 + smem_row_a * 16);
-            ldmatrix_m16n8_x2_trans_b16(reg_v1, s_vstage + cur_buf * 256 + smem_row_a * 16 + 8);
+            ldmatrix_m16n8_x2_trans_b16(reg_v0, s_vstage + cur_buf * (16 * V_STRIDE) + smem_row_a * V_STRIDE);
+            ldmatrix_m16n8_x2_trans_b16(reg_v1, s_vstage + cur_buf * (16 * V_STRIDE) + smem_row_a * V_STRIDE + 8);
 
             mma_m16n8k16_fp32_fp16_fp16_fp32(oacc[dvc][0], reg_p, reg_v0, oacc[dvc][0]);
             mma_m16n8k16_fp32_fp16_fp16_fp32(oacc[dvc][1], reg_p, reg_v1, oacc[dvc][1]);
@@ -1445,12 +1454,16 @@ __global__ void sdpa_kernel_mma_fp16(
 }
 
 static size_t mma_fp16_smem_bytes(int64_t d_k, int64_t d_v) {
-    constexpr int Q_ROWS    = 64;
-    constexpr int K_CHUNK_W = 32;
+    constexpr int Q_ROWS        = 64;
+    constexpr int K_CHUNK_W     = 32;
+    constexpr int SMEM_ROW_PAD  = 8;
     (void)d_v;
-    return (size_t)Q_ROWS * (size_t)d_k * sizeof(__half)              // s_q
-         + (size_t)2 * 16 * K_CHUNK_W * sizeof(__half)                // s_kchunk
-         + (size_t)2 * 16 * 16        * sizeof(__half);               // s_vstage
+    const int q_stride = (int)d_k + SMEM_ROW_PAD;
+    const int k_stride = K_CHUNK_W + SMEM_ROW_PAD;
+    const int v_stride = 16        + SMEM_ROW_PAD;
+    return (size_t)Q_ROWS * (size_t)q_stride * sizeof(__half)         // s_q
+         + (size_t)2 * 16 * k_stride * sizeof(__half)                 // s_kchunk
+         + (size_t)2 * 16 * v_stride * sizeof(__half);                // s_vstage
 }
 
 void sdpa_mma_fp16_cuda(

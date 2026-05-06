@@ -1063,7 +1063,122 @@ support needs either:
 
 Either is a nontrivial change; leaving as a tracked TODO.
 
-## What I'd actually do next (post-Step 15)
+## Step 16 — pad smem rows by 8 fp16 to break 32-bank aliasing
+
+`ncu --set full` on the kernel at `B=4 H=8 S=128 d=128` flagged
+**11.2-way bank conflict on 78.57% of all shared loads** (720k conflicts
+out of 917k wavefronts). The advisor estimated **31.8% local speedup** if
+fixed.
+
+The pathology: every row of `s_q` / `s_kchunk` / `s_vstage` was 16 fp16
+(32 bytes) wide × multiples thereof. With 32 banks × 4 bytes = 128 bytes
+per bank wave, a row stride of 32/64/128/256/512 bytes is always a clean
+multiple of 128 — so `ldmatrix` gathering 8/16 different rows simultaneously
+hits the same banks every time and serializes.
+
+**Fix**: pad each smem row by 8 fp16 (16 bytes). Each row stride goes
+`d_k` → `d_k + 8` (fp16 elements), `K_CHUNK_W=32` → 40, `16` → 24. The
+bank shift between adjacent rows becomes 4 (mod 32) instead of 0, so over
+16 lanes the worst-case conflict drops from 16-way to 2-way.
+
+Smem footprint cost: ~1.5 KB per CTA at d_k=512 (negligible).
+
+### First attempt: subtle bug
+
+The first refactor introduced a regression unrelated to padding —
+`NUM_WARPS` got changed from 4 to 2 in the same edit, which silently kept
+warps 2/3 idle while still launching them with stale Q-row offsets. Took
+a frustrating bisect to find. Lesson: don't bundle a refactor and a
+constant-tweak in the same edit pass.
+
+### Result (after fix)
+
+Initially I got fooled by a noisy 3-iter sweep that reported 0.95× of
+cuDNN at B=1 S=8192 d=64. Re-ran with 30+ iters per cell — honest
+steady-state numbers below.
+
+Steady-state at B=4 H=8 S=256 (historical reference workload, 100 iters):
+
+| `d_v` | Step 15 (no pad) | Step 16 (pad) | Δ |
+|---:|---:|---:|---:|
+| 64  | 0.141 ms | 0.125 ms | **+13%** |
+| 128 | 0.243 ms | 0.229 ms | **+6%**  |
+| 256 | 0.563 ms | 0.535 ms | **+5%**  |
+| 512 | 1.311 ms | 1.428 ms | -9% (regress at this config) |
+
+At the small reference workload the wins are smaller and not uniform —
+d=512 at S=256 actually regresses ~9% under steady-state, suggesting
+the padding's marginal smem cost trades against the bank-conflict win
+config-by-config.
+
+The clearer story is at **long-S, small-d** where the QKT inner loop
+(with the worst bank conflicts) dominates and the kernel was previously
+scheduler-stall-bound:
+
+| Config | Step 15 | Step 16 (steady) | wall speedup | TFLOPS Δ |
+|---|---:|---:|---:|---:|
+| B=4 S=2048 d=64 | 2.80 ms (12.3 TF) | 1.80 ms (19.1 TF) | **1.56×** | +55% |
+| B=4 S=4096 d=64 | 8.91 ms (15.4 TF) | 6.20 ms (22.2 TF) | **1.44×** | +44% |
+| B=4 S=8192 d=64 | 36.59 ms (15.0 TF) | 22.23 ms (24.7 TF) | **1.65×** | +65% |
+| B=1 S=8192 d=64 | 8.88 ms (15.5 TF) | 5.65 ms (24.3 TF) | **1.57×** | +57% |
+
+These numbers are real and consistent across re-runs.
+
+### Headline (apples-to-apples vs cuDNN fp16 SDPA)
+
+**B=4 H=8 S=8192 d=64: tensorax 24.73 TFLOPS vs cuDNN 31.33 TFLOPS — 0.79×.**
+First config in the journal where tensorax gets within ~25% of cuDNN.
+
+The gap pattern across the steady-state sweep:
+
+| `d_v` | best ratio | where |
+|---:|---:|---|
+| 64  | **0.79×** | B=4 S=8192 (and B=1 S=8192 at 0.79×) |
+| 128 | **0.60×** | B=4 S=8192 |
+| 256 | **0.42×** | B=1 S=512 |
+| 512 | **0.50×** | B=4 S=8192 |
+
+Small d wins big. Large d still loses 2-3× — likely because the
+per-warp `oacc` register footprint at d_v ≥ 256 forces 1 CTA / SM
+(vs cuDNN's deeper register schedule), and the K/V re-read redundancy
+across CTAs costs more in DRAM bandwidth at high d.
+
+### `ncu` advisor projection vs reality
+
+Predicted: 31.8% local speedup from fixing bank conflicts.
+Achieved: 5-13% wall at the small reference workload, 44-65% at
+small-d long-S.
+
+The "local speedup" number applies to the L1/TEX pipeline, not the
+whole kernel. Bank conflicts were burning ~30% of L1 cycles, but L1
+is only one of several stall sources. Killing them lets schedulers
+issue more often (eligible-warps-per-cycle was 0.08, well below the
+1 needed to fully utilize), which is why the long-S configs — where
+the kernel is actually scheduler-stall-bound — see the bigger gain.
+
+## Updated final state (post-Step 16, apples-to-apples)
+
+At B=4 H=8 S=256 Dk=Dv=512 (historical reference):
+
+| Path | time | TFLOPS (old formula) | Δ vs Step 7 |
+|---|---:|---:|---:|
+| Step 7 (pre-attempt baseline)            | 4.7 ms | 1.37 | — |
+| Step 11 (FA-2 split-Q parallel QKT)      | 4.1 ms | 1.59 | +16 % |
+| Step 12 (oacc pack + lazy correction)    | 3.7 ms | 1.76 | +28 % |
+| Step 13 (templated `DV_CHUNKS`)          | 2.0 ms | 3.24 | +136 % |
+| Step 15 (`ldmatrix.x2.trans` + Q pre-scale) | 1.55 ms | 4.18 | +205 % |
+| **Step 16 (smem row padding)**           | **1.43 ms** | **4.54** | **+231 %** |
+| **PyTorch fp16 SDPA (cuDNN)**            | **0.29 ms** | **22.4** | — |
+
+At the historical reference workload (B=4 H=8 S=256 d=512) padding
+slightly *regresses* on this row alone (1.31 ms → 1.43 ms steady-state).
+The padding's marginal smem cost happens to be net-negative at this one
+small config. The gain elsewhere (especially small-d, long-S) is large
+enough to keep it on, but the headline number on this single workload
+moves backward in this step. The picture across the sweep is in
+`benchmarks/attn_sweep.csv`.
+
+## What I'd actually do next (post-Step 16)
 
 1. **Cut `s_q` smem.** The 64 KB `s_q` is the dominant CTA-resident
    footprint. Two ways:

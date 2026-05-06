@@ -72,34 +72,35 @@ NumPy CPU (baseline)       2.03s   1.0x
 ```
 
 Attention — apples-to-apples vs PyTorch fp16 SDPA (cuDNN's fused path),
-B=4 H=8, fp16 inputs, RTX 3070 Ti Laptop. Time per run:
+B=4 H=8, fp16 inputs, RTX 3070 Ti Laptop. Time per run, steady-state
+(50+ iters per measurement):
 
 ```
-                  S=256     S=512    S=1024   S=2048   S=4096   S=8192
-d=64    tensorax  0.16 ms   0.28 ms  0.76 ms   2.80 ms   8.91 ms  36.59 ms
-        PyTorch   0.03 ms   0.08 ms  0.26 ms   1.10 ms   4.29 ms  17.21 ms
-        ratio     0.19x     0.30x    0.34x     0.39x    0.48x     0.47x
-d=128   tensorax  0.24 ms   0.62 ms  1.55 ms   5.81 ms  21.49 ms  69.29 ms
-        PyTorch   0.05 ms   0.14 ms  0.54 ms   2.03 ms   8.49 ms  34.76 ms
-        ratio     0.23x     0.23x    0.35x     0.35x    0.40x     0.50x
-d=256   tensorax  0.59 ms   1.63 ms  4.82 ms  16.04 ms  51.62 ms 203.3 ms
-        PyTorch   0.09 ms   0.32 ms  1.33 ms   4.39 ms  18.36 ms  73.1 ms
-        ratio     0.14x     0.20x    0.27x     0.27x    0.36x     0.36x
-d=512   tensorax  1.55 ms   4.84 ms 14.08 ms  46.09 ms 178.2 ms  721.6 ms
-        PyTorch   0.30 ms   1.11 ms  4.71 ms  19.86 ms  78.0 ms  334.2 ms
-        ratio     0.19x     0.23x    0.33x     0.43x    0.44x     0.46x
+                  S=256     S=512    S=1024   S=2048   S=4096    S=8192
+d=64    tensorax  0.13 ms   0.24 ms  0.55 ms   1.80 ms   6.20 ms  22.23 ms
+        PyTorch   0.03 ms   0.07 ms  0.28 ms   1.14 ms   4.42 ms  17.55 ms
+        ratio     0.23x     0.31x    0.50x     0.64x    0.71x     0.79x
+d=128   tensorax  0.23 ms   0.52 ms  1.32 ms   4.56 ms  15.31 ms  56.79 ms
+        PyTorch   0.05 ms   0.14 ms  0.54 ms   2.20 ms   8.62 ms  34.34 ms
+        ratio     0.24x     0.27x    0.41x     0.48x    0.56x     0.60x
+d=256   tensorax  0.54 ms   1.21 ms  3.83 ms  13.36 ms  47.08 ms 185.25 ms
+        PyTorch   0.09 ms   0.29 ms  1.14 ms   4.50 ms  18.33 ms  72.82 ms
+        ratio     0.16x     0.24x    0.30x     0.34x    0.39x     0.39x
+d=512   tensorax  1.43 ms   3.87 ms 12.19 ms  43.65 ms 167.7 ms  673.8 ms
+        PyTorch   0.29 ms   1.14 ms  4.61 ms  19.47 ms  80.4 ms  336.3 ms
+        ratio     0.20x     0.29x    0.38x     0.45x    0.48x     0.50x
 ```
 
 (`d=1024` unsupported on this kernel — `s_q` smem at `d_k=1024` is
 128 KB vs sm_86's 99 KB CTA cap.)
 
-cuDNN's fused-attention path is **2.0×-7× faster** than tensorax across
-all supported configs. The gap is widest at small problems
-(per-CTA setup cost dominates) and tightest at long seq + large batch
-(both kernels saturate compute). Tensorax peaks at ~16 TFLOPS, PyTorch
-at ~34 TFLOPS — both well below the GPU's 84 TFLOPS fp16 Tensor Core
-peak, but cuDNN gets ~2× closer. Full sweep across (B, S, d) is in
-`benchmarks/attn_sweep.csv` (run `python benchmarks/attn_sweep.py`).
+The best config is **B=4 H=8 S=8192 d=64**: tensorax **24.73 TFLOPS** vs
+cuDNN's 31.33 TFLOPS — a **0.79× ratio**. At long `S` and small `d` the
+kernel is compute-bound on Tensor Cores and the gap to cuDNN closes
+substantially; at large `d` cuDNN's tile schedule still wins by 2-3×.
+Tensorax peaks at ~25 TFLOPS, PyTorch at ~33 TFLOPS, both versus the
+GPU's 84 TFLOPS fp16 Tensor Core ceiling. Full sweep across (B, S, d)
+is in `benchmarks/attn_sweep.csv` (run `python benchmarks/attn_sweep.py`).
 
 Other tensorax variants at Dk=Dv=512, S=256 (30 iterations, baselined
 to NumPy fp32):
@@ -122,18 +123,20 @@ parallel against shared K), per-warp register-resident softmax via
 when the running max barely shifts), Q pre-scaled by `scale·log2(e)` at load
 so the softmax uses `exp2.approx` directly (one fmul per exp call dropped),
 direct `ldmatrix.x2.trans` of V from the row-major staging buffer (no
-explicit transpose pass), and a templated `DV_CHUNKS` parameter so the PV
-loop's compile-time bound lets ptxas pin the output accumulator into
-registers (verified with `-Xptxas=-v`: zero local-memory stack frame for
+explicit transpose pass), an 8-fp16 row pad on every smem buffer (`s_q`,
+`s_kchunk`, `s_vstage`) so the row stride isn't a multiple of the 32-bank
+× 4-byte = 128-byte cycle (drops `ldmatrix` bank conflicts from ncu's
+~11-way down to 2-way over 16 lanes), and a templated `DV_CHUNKS` parameter
+so the PV loop's compile-time bound lets ptxas pin the output accumulator
+into registers (verified with `-Xptxas=-v`: zero local-memory stack frame for
 `d_v ≤ 256`).
 
 The fp16 path takes pre-cast fp16 Q/K/V (matching how a real KV cache feeds an
 inference workload) and skips the per-tile fp32→fp16 cast pass. Apples-to-apples
-against PyTorch fp16 SDPA (cuDNN's fused-attention path), tensorax is ~2.5×–7×
-behind across the (B, S, d) sweep — the gap is closing as we work through the
-items in `docs/profiling/RESULTS.md` (smaller `s_q` smem to fit 2 CTAs/SM,
-persistent CTA scheduling, cooperative K loading) but cuDNN remains the
-target.
+against PyTorch fp16 SDPA (cuDNN's fused-attention path), tensorax ranges from
+**0.13× at small problems to 0.79× at large-S small-d configs**. The gap at
+large `d_v` is tracked in `docs/profiling/RESULTS.md` (next steps: smaller
+`s_q` smem for 2 CTAs/SM, persistent CTA scheduling, cooperative K loading).
 
 ## Project layout
 
