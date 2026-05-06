@@ -71,14 +71,21 @@ Tensorax Default           1.25s   1.6x
 NumPy CPU (baseline)       2.03s   1.0x
 ```
 
-Attention — B=4 H=8 S=256 Dk=512 Dv=512, fp16 inputs, 100 iterations:
+Attention — B=4 H=8 S=256, fp16 inputs, 100 iterations, time per run:
 
 ```
-PyTorch SDPA fp16          0.10s   3.5x  (4.10 TFLOPS, cuDNN)
-Tensorax MMA fp16          0.37s   1.0x  <- best tensorax (1.17 TFLOPS)
+                    Dk=Dv=64    Dk=Dv=128   Dk=Dv=256   Dk=Dv=512
+Tensorax MMA fp16    0.20 ms     0.30 ms     0.86 ms     2.00 ms
+PyTorch SDPA fp16    0.19 ms     0.28 ms     0.67 ms     1.10 ms
+gap vs cuDNN         1.05x       1.07x       1.28x       1.82x
 ```
 
-Other tensorax variants (30 iterations, baselined to NumPy):
+For `d_v ≤ 128` tensorax matches cuDNN's fused-attention path. The gap
+opens at larger `d_v` because the per-warp output accumulator overflows
+the 255-register cap and partially spills (see `docs/profiling/RESULTS.md`,
+Step 13). Smaller-d configs are register-resident with zero spill.
+
+Other tensorax variants at Dk=Dv=512 (30 iterations, baselined to NumPy):
 
 ```
 Tensorax MMA fp32          0.30s   18x  (0.64 TFLOPS, fp32 inputs)
@@ -95,13 +102,16 @@ streaming with overlap across kv-tile boundaries, FA-2 split-Q across 4 warps
 (each warp owns 16 query rows × full d_v with all warps running QKT in
 parallel against shared K), per-warp register-resident softmax via
 `__shfl_xor_sync` reductions, lazy output correction (skip the per-row rescale
-pass when the running max barely shifts), and register-resident output
-accumulators (no smem traffic for P or O between tiles).
+when the running max barely shifts), and a templated `DV_CHUNKS` parameter so
+the PV loop's compile-time bound lets ptxas pin the output accumulator into
+registers (verified with `-Xptxas=-v`: zero local-memory stack frame for
+`d_v ≤ 256`).
 
 The fp16 path takes pre-cast fp16 Q/K/V (matching how a real KV cache feeds an
 inference workload) and skips the per-tile fp32→fp16 cast pass. Apples-to-apples
-against PyTorch fp16 SDPA (cuDNN's fused-attention path), tensorax is ~3.5×
-behind — closing that gap is ongoing work; tracked in `ROADMAP.md` and
+against PyTorch fp16 SDPA (cuDNN's fused-attention path), tensorax matches
+cuDNN at `d_v ≤ 128` and is ~1.8× behind at `d_v=512` — closing the
+larger-`d_v` gap is ongoing work; tracked in `ROADMAP.md` and
 `docs/profiling/RESULTS.md`.
 
 ## Project layout

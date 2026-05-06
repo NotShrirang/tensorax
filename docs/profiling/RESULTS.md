@@ -775,7 +775,70 @@ registers" — neither was measured with `-Xptxas=-v`, both were
 register-pressure inferences from array sizes. Should have run ptxas
 in Step 5.
 
-## What I'd actually do next (post-Step 12, corrected)
+## Step 13 — pin `oacc` into registers via templated `DV_CHUNKS`
+
+The fix the postscript pointed at: `#pragma unroll` alone wasn't enough
+because `dv_chunks = d_v / 16` is a runtime variable. Made the kernel
+a template `template <int DV_CHUNKS>`, sized `oacc[DV_CHUNKS][2][4]`
+exactly, and unrolled both the rescale and PV loops by `DV_CHUNKS`.
+The dispatcher in `sdpa_mma_fp16_cuda` switches on `d_v / 16` and
+launches one of `{4, 8, 16, 32}` instantiations. Same kernel body —
+just a compile-time bound on the loops oacc lives inside.
+
+`ptxas -v` after the change:
+
+| `DV_CHUNKS` | `d_v` | stack frame | spills | registers |
+|---|---:|---:|---:|---:|
+| 4  |  64 | **0 B** | 0 / 0 | 72 |
+| 8  | 128 | **0 B** | 0 / 0 | 128 |
+| 16 | 256 | **0 B** | 0 / 0 | 168 |
+| 32 | 512 | 168 B | 588 / 452 | 255 (cap) |
+
+For `d_v ≤ 256`, `oacc` is fully register-resident — the local-memory
+stack frame is gone, no spills. `d_v = 512` runs into the 255-reg /
+thread cap and spills 588 B back to local memory — but the unrolled
+access pattern still wins, because the live values now use direct
+register addressing instead of indexed local-memory loads/stores for
+the parts that *do* fit.
+
+**Results** (B=4, H=8, Sq=Sk=256, fp16, 100-run wall time, median of 3
+invocations; PyTorch fp16 SDPA = cuDNN reference):
+
+| `d_k = d_v` | Step 12 | **Step 13** | Δ time | PyTorch fp16 | vs PyTorch |
+|---|---:|---:|---:|---:|---:|
+|  64 | — | **0.20 ms** | — | 0.19 ms | **1.05×** |
+| 128 | — | **0.30 ms** | — | 0.28 ms | **1.07×** |
+| 256 | — | **0.86 ms** | — | 0.67 ms | 1.28× |
+| 512 | 3.7 ms | **2.0 ms** | **−46 %** | 1.10 ms | 1.82× |
+
+For `d_v ≤ 128` we now match cuDNN. For `d_v = 512` (the benchmark
+default) we cut wall time nearly in half despite the partial spill,
+and the gap to cuDNN closes from ~3.5× (Step 12) to ~1.8× (Step 13).
+
+The earlier "register pressure caps you at 1 CTA / SM" diagnosis was
+*the wrong frame entirely* — Step 13's win came from getting `oacc`
+out of L1 latency, not from freeing registers for occupancy. Smem at
+`d_v = 512` still pins us to 1 CTA / SM, but with `oacc` in registers
+each CTA does its work with far fewer L1 round-trips per kv-tile.
+
+## Updated final state (post-Step 13)
+
+| Path | time | TFLOPS (old formula) | Δ vs Step 7 |
+|---|---:|---:|---:|
+| Step 7 (pre-attempt baseline)        | 4.7 ms | 1.37 | — |
+| Step 8 (multi-warp Q tiling)         | 4.7 ms | 1.38 | flat |
+| Step 9 (V[0] preissue)               | 4.8 ms | 1.35 | −1.5 % |
+| Step 10 (K[T+1] pingpong)            | 5.0 ms | 1.27 | −7.3 % |
+| Step 11 (FA-2 split-Q parallel QKT)  | 4.1 ms | 1.59 | +16 % |
+| Step 12 (oacc pack + lazy correction)| 3.7 ms | 1.76 | +28 % |
+| **Step 13 (templated `DV_CHUNKS`)**  | **2.0 ms** | **3.24** | **+136 %** |
+| PyTorch fp16 SDPA (cuDNN)            | 1.10 ms | 5.86 | — |
+
+(TFLOPS in the table use the original `4·B·H·S²·Dk + 2·B·H·S²·Dv`
+formula for comparability with earlier rows; the bench prints the
+newer `2·B·H·S²·(Dk + Dv)` formula, which divides everything by 1.5.)
+
+## What I'd actually do next (post-Step 13)
 
 1. **Cut `s_q` smem.** The 64 KB `s_q` is the dominant CTA-resident
    footprint. Two ways:

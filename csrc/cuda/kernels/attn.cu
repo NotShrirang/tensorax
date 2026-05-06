@@ -1133,6 +1133,7 @@ std::vector<long long> sdpa_optimized_flash_profile_sections_cuda(
 }
 
 
+template <int DV_CHUNKS>
 __global__ void sdpa_kernel_mma_fp16(
     const __half* __restrict__ Q,
     const __half* __restrict__ K,
@@ -1193,10 +1194,9 @@ __global__ void sdpa_kernel_mma_fp16(
         }
     }
 
-    constexpr int MAX_CHUNKS = 32;
-    float oacc[MAX_CHUNKS][2][4];
+    float oacc[DV_CHUNKS][2][4];
     #pragma unroll
-    for (int i = 0; i < MAX_CHUNKS; i++) {
+    for (int i = 0; i < DV_CHUNKS; i++) {
         #pragma unroll
         for (int n = 0; n < 2; n++) {
             oacc[i][n][0] = oacc[i][n][1] = oacc[i][n][2] = oacc[i][n][3] = 0.0f;
@@ -1205,7 +1205,6 @@ __global__ void sdpa_kernel_mma_fp16(
     __syncthreads();
 
     int dk_chunks = d_k / 16;
-    int dv_chunks = d_v / 16;
 
     auto issue_k_chunk = [&] (int kv_start, int dk, int buf) {
         int row = lane / 2;
@@ -1313,7 +1312,7 @@ __global__ void sdpa_kernel_mma_fp16(
 
         if (update_r0) {
             #pragma unroll
-            for (int i = 0; i < MAX_CHUNKS; i++) {
+            for (int i = 0; i < DV_CHUNKS; i++) {
                 oacc[i][0][0] *= corr_r0;
                 oacc[i][0][1] *= corr_r0;
                 oacc[i][1][0] *= corr_r0;
@@ -1322,7 +1321,7 @@ __global__ void sdpa_kernel_mma_fp16(
         }
         if (update_r1) {
             #pragma unroll
-            for (int i = 0; i < MAX_CHUNKS; i++) {
+            for (int i = 0; i < DV_CHUNKS; i++) {
                 oacc[i][0][2] *= corr_r1;
                 oacc[i][0][3] *= corr_r1;
                 oacc[i][1][2] *= corr_r1;
@@ -1349,12 +1348,13 @@ __global__ void sdpa_kernel_mma_fp16(
             cp_async_commit();
         }
 
-        for (int dvc = 0; dvc < dv_chunks; dvc++) {
+        #pragma unroll
+        for (int dvc = 0; dvc < DV_CHUNKS; dvc++) {
             int dv = dvc * 16;
             int cur_buf = dvc & 1;
 
             if (warp_id == 0) {
-                if (dvc + 1 < dv_chunks) {
+                if (dvc + 1 < DV_CHUNKS) {
                     int next_buf = (dvc + 1) & 1;
                     issue_v_chunk(kv_start, dv + 16, next_buf);
                     cp_async_commit();
@@ -1393,7 +1393,8 @@ __global__ void sdpa_kernel_mma_fp16(
         bool ok1 = (q1 < seq_len_q);
         float inv_l0 = ok0 ? (1.0f / l_r0) : 0.0f;
         float inv_l1 = ok1 ? (1.0f / l_r1) : 0.0f;
-        for (int dvc = 0; dvc < dv_chunks; dvc++) {
+        #pragma unroll
+        for (int dvc = 0; dvc < DV_CHUNKS; dvc++) {
             int dv = dvc * 16;
             if (ok0) {
                 out_base[q0 * d_v + dv + c0]         = oacc[dvc][0][0] * inv_l0;
@@ -1442,19 +1443,32 @@ void sdpa_mma_fp16_cuda(
     dim3 grid(1, CEIL_DIV(seq_len_q, 64), batch_size * num_heads);
 
     size_t smem_size = mma_fp16_smem_bytes(d_k, d_v);
-    if (smem_size > 48 * 1024) {
-        cudaFuncSetAttribute(sdpa_kernel_mma_fp16,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize,
-                             (int)smem_size);
-    }
+    int dv_chunks_runtime = static_cast<int>(d_v / 16);
 
-    sdpa_kernel_mma_fp16<<<grid, block, smem_size>>>(
-        static_cast<const __half*>(Q_h),
-        static_cast<const __half*>(K_h),
-        static_cast<const __half*>(V_h),
-        out,
-        batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v, scale
-    );
+    auto launch = [&] (auto kernel_ptr) {
+        if (smem_size > 48 * 1024) {
+            cudaFuncSetAttribute(kernel_ptr,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                 (int)smem_size);
+        }
+        kernel_ptr<<<grid, block, smem_size>>>(
+            static_cast<const __half*>(Q_h),
+            static_cast<const __half*>(K_h),
+            static_cast<const __half*>(V_h),
+            out,
+            batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v, scale
+        );
+    };
+
+    switch (dv_chunks_runtime) {
+        case 4:  launch(&sdpa_kernel_mma_fp16<4>);  break;
+        case 8:  launch(&sdpa_kernel_mma_fp16<8>);  break;
+        case 16: launch(&sdpa_kernel_mma_fp16<16>); break;
+        case 32: launch(&sdpa_kernel_mma_fp16<32>); break;
+        default:
+            throw std::runtime_error(
+                "sdpa_mma_fp16: d_v must be one of 64, 128, 256, 512");
+    }
 
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
