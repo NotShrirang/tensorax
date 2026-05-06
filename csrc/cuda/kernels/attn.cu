@@ -1154,7 +1154,7 @@ __global__ void sdpa_kernel_mma_fp16(
     int d_v,
     float scale
 ) {
-    constexpr int NUM_WARPS         = 2;
+    constexpr int NUM_WARPS         = 4;
     constexpr int ROWS_PER_WARP     = 16;
     constexpr int Q_ROWS            = NUM_WARPS * ROWS_PER_WARP;
     constexpr int Q_TILES_PER_CTA   = 1;
