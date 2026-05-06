@@ -71,21 +71,38 @@ Tensorax Default           1.25s   1.6x
 NumPy CPU (baseline)       2.03s   1.0x
 ```
 
-Attention — B=4 H=8 S=256, fp16 inputs, 100 iterations, time per run:
+Attention — apples-to-apples vs PyTorch fp16 SDPA (cuDNN's fused path),
+B=4 H=8, fp16 inputs, RTX 3070 Ti Laptop. Time per run:
 
 ```
-                    Dk=Dv=64    Dk=Dv=128   Dk=Dv=256   Dk=Dv=512
-Tensorax MMA fp16    0.20 ms     0.30 ms     0.86 ms     2.00 ms
-PyTorch SDPA fp16    0.19 ms     0.28 ms     0.67 ms     1.10 ms
-gap vs cuDNN         1.05x       1.07x       1.28x       1.82x
+                  S=256     S=512    S=1024   S=2048   S=4096   S=8192
+d=64    tensorax  0.16 ms   0.28 ms  0.76 ms   2.80 ms   8.91 ms  36.59 ms
+        PyTorch   0.03 ms   0.08 ms  0.26 ms   1.10 ms   4.29 ms  17.21 ms
+        ratio     0.19x     0.30x    0.34x     0.39x    0.48x     0.47x
+d=128   tensorax  0.24 ms   0.62 ms  1.55 ms   5.81 ms  21.49 ms  69.29 ms
+        PyTorch   0.05 ms   0.14 ms  0.54 ms   2.03 ms   8.49 ms  34.76 ms
+        ratio     0.23x     0.23x    0.35x     0.35x    0.40x     0.50x
+d=256   tensorax  0.59 ms   1.63 ms  4.82 ms  16.04 ms  51.62 ms 203.3 ms
+        PyTorch   0.09 ms   0.32 ms  1.33 ms   4.39 ms  18.36 ms  73.1 ms
+        ratio     0.14x     0.20x    0.27x     0.27x    0.36x     0.36x
+d=512   tensorax  1.55 ms   4.84 ms 14.08 ms  46.09 ms 178.2 ms  721.6 ms
+        PyTorch   0.30 ms   1.11 ms  4.71 ms  19.86 ms  78.0 ms  334.2 ms
+        ratio     0.19x     0.23x    0.33x     0.43x    0.44x     0.46x
 ```
 
-For `d_v ≤ 128` tensorax matches cuDNN's fused-attention path. The gap
-opens at larger `d_v` because the per-warp output accumulator overflows
-the 255-register cap and partially spills (see `docs/profiling/RESULTS.md`,
-Step 13). Smaller-d configs are register-resident with zero spill.
+(`d=1024` unsupported on this kernel — `s_q` smem at `d_k=1024` is
+128 KB vs sm_86's 99 KB CTA cap.)
 
-Other tensorax variants at Dk=Dv=512 (30 iterations, baselined to NumPy):
+cuDNN's fused-attention path is **2.0×-7× faster** than tensorax across
+all supported configs. The gap is widest at small problems
+(per-CTA setup cost dominates) and tightest at long seq + large batch
+(both kernels saturate compute). Tensorax peaks at ~16 TFLOPS, PyTorch
+at ~34 TFLOPS — both well below the GPU's 84 TFLOPS fp16 Tensor Core
+peak, but cuDNN gets ~2× closer. Full sweep across (B, S, d) is in
+`benchmarks/attn_sweep.csv` (run `python benchmarks/attn_sweep.py`).
+
+Other tensorax variants at Dk=Dv=512, S=256 (30 iterations, baselined
+to NumPy fp32):
 
 ```
 Tensorax MMA fp32          0.30s   18x  (0.64 TFLOPS, fp32 inputs)
@@ -102,17 +119,21 @@ streaming with overlap across kv-tile boundaries, FA-2 split-Q across 4 warps
 (each warp owns 16 query rows × full d_v with all warps running QKT in
 parallel against shared K), per-warp register-resident softmax via
 `__shfl_xor_sync` reductions, lazy output correction (skip the per-row rescale
-when the running max barely shifts), and a templated `DV_CHUNKS` parameter so
-the PV loop's compile-time bound lets ptxas pin the output accumulator into
+when the running max barely shifts), Q pre-scaled by `scale·log2(e)` at load
+so the softmax uses `exp2.approx` directly (one fmul per exp call dropped),
+direct `ldmatrix.x2.trans` of V from the row-major staging buffer (no
+explicit transpose pass), and a templated `DV_CHUNKS` parameter so the PV
+loop's compile-time bound lets ptxas pin the output accumulator into
 registers (verified with `-Xptxas=-v`: zero local-memory stack frame for
 `d_v ≤ 256`).
 
 The fp16 path takes pre-cast fp16 Q/K/V (matching how a real KV cache feeds an
 inference workload) and skips the per-tile fp32→fp16 cast pass. Apples-to-apples
-against PyTorch fp16 SDPA (cuDNN's fused-attention path), tensorax matches
-cuDNN at `d_v ≤ 128` and is ~1.8× behind at `d_v=512` — closing the
-larger-`d_v` gap is ongoing work; tracked in `ROADMAP.md` and
-`docs/profiling/RESULTS.md`.
+against PyTorch fp16 SDPA (cuDNN's fused-attention path), tensorax is ~2.5×–7×
+behind across the (B, S, d) sweep — the gap is closing as we work through the
+items in `docs/profiling/RESULTS.md` (smaller `s_q` smem to fit 2 CTAs/SM,
+persistent CTA scheduling, cooperative K loading) but cuDNN remains the
+target.
 
 ## Project layout
 

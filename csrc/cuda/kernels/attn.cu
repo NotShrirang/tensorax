@@ -73,8 +73,15 @@ __device__ __forceinline__ void ldmatrix_m16n8_x2_b16(uint32_t regs[2], const vo
     );
 }
 
-// cp.async helpers (sm_80+). Stages 16 bytes (one float4 / eight halves) per
-// thread directly from global to shared memory, bypassing the register file.
+__device__ __forceinline__ void ldmatrix_m16n8_x2_trans_b16(uint32_t regs[2], const void* smem_ptr) {
+    uint32_t smem_addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+    asm volatile(
+        "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%0, %1}, [%2];\n"
+        : "=r"(regs[0]), "=r"(regs[1])
+        : "r"(smem_addr)
+    );
+}
+
 __device__ __forceinline__ void cp_async_16B(void* smem_ptr, const void* gmem_ptr) {
     uint32_t smem_addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
     asm volatile(
@@ -1133,7 +1140,7 @@ std::vector<long long> sdpa_optimized_flash_profile_sections_cuda(
 }
 
 
-template <int DV_CHUNKS>
+template <int DV_CHUNKS, int D_V_PASSES = 1>
 __global__ void sdpa_kernel_mma_fp16(
     const __half* __restrict__ Q,
     const __half* __restrict__ K,
@@ -1147,14 +1154,15 @@ __global__ void sdpa_kernel_mma_fp16(
     int d_v,
     float scale
 ) {
-    constexpr int NUM_WARPS     = 4;
-    constexpr int ROWS_PER_WARP = 16;
-    constexpr int Q_ROWS        = NUM_WARPS * ROWS_PER_WARP;
+    constexpr int NUM_WARPS         = 2;
+    constexpr int ROWS_PER_WARP     = 16;
+    constexpr int Q_ROWS            = NUM_WARPS * ROWS_PER_WARP;
+    constexpr int Q_TILES_PER_CTA   = 1;
 
     int b = blockIdx.z / num_heads;
     int h = blockIdx.z % num_heads;
-    int q_start = blockIdx.y * Q_ROWS;
-    if (b >= batch_size || h >= num_heads || q_start >= seq_len_q) return;
+    int q_block_start = blockIdx.y * Q_TILES_PER_CTA * Q_ROWS;
+    if (b >= batch_size || h >= num_heads || q_block_start >= seq_len_q) return;
 
     int tid       = threadIdx.x;
     int warp_id   = tid >> 5;
@@ -1166,11 +1174,14 @@ __global__ void sdpa_kernel_mma_fp16(
     const __half* v_ptr  = V + qkv_base * seq_len_k * d_v;
     float* out_base      = out + qkv_base * seq_len_q * d_v;
 
+    constexpr int K_CHUNK_W = 32;
     extern __shared__ __half mma_smem[];
     __half* s_q       = mma_smem;
     __half* s_kchunk  = s_q + Q_ROWS * d_k;
-    __half* s_vstage  = s_kchunk + 2 * 16 * 16;
-    __half* s_vchunk  = s_vstage + 2 * 16 * 16;
+    __half* s_vstage  = s_kchunk + 2 * 16 * K_CHUNK_W;
+    // V is read directly from s_vstage via ldmatrix.x2.trans (transposes the
+    // 8×8 tiles in-flight). The old s_vchunk col-major buffer + transpose pass
+    // are gone.
 
     int r0         = lane / 4;
     int r1         = r0 + 8;
@@ -1180,37 +1191,16 @@ __global__ void sdpa_kernel_mma_fp16(
     int b_col      = lane & 7;
     int b_khalf    = ((lane >> 3) & 1) * 8;
 
+    int dk_chunks = d_k / K_CHUNK_W;
     int total_q_ops = (Q_ROWS * d_k) / 8;
-    for (int i = tid; i < total_q_ops; i += 128) {
-        int idx = i * 8;
-        int row = idx / d_k;
-        int col = idx % d_k;
-        bool in_range = (q_start + row) < seq_len_q;
-        float4* dst = reinterpret_cast<float4*>(s_q + row * d_k + col);
-        if (in_range) {
-            *dst = *reinterpret_cast<const float4*>(q_base + (q_start + row) * d_k + col);
-        } else {
-            *dst = float4{0.0f, 0.0f, 0.0f, 0.0f};
-        }
-    }
-
-    float oacc[DV_CHUNKS][2][4];
-    #pragma unroll
-    for (int i = 0; i < DV_CHUNKS; i++) {
-        #pragma unroll
-        for (int n = 0; n < 2; n++) {
-            oacc[i][n][0] = oacc[i][n][1] = oacc[i][n][2] = oacc[i][n][3] = 0.0f;
-        }
-    }
-    __syncthreads();
-
-    int dk_chunks = d_k / 16;
 
     auto issue_k_chunk = [&] (int kv_start, int dk, int buf) {
         int row = lane / 2;
-        int col = (lane % 2) * 8;
-        cp_async_16B(s_kchunk + buf * 256 + row * 16 + col,
-                     k_ptr + (kv_start + row) * d_k + dk + col);
+        int col_lo = (lane % 2) * 8;
+        int col_hi = col_lo + 16;
+        __half* dst_base = s_kchunk + buf * (16 * K_CHUNK_W) + row * K_CHUNK_W;
+        cp_async_16B(dst_base + col_lo, k_ptr + (kv_start + row) * d_k + dk + col_lo);
+        cp_async_16B(dst_base + col_hi, k_ptr + (kv_start + row) * d_k + dk + col_hi);
     };
     auto issue_v_chunk = [&] (int kv_start, int dv, int buf) {
         int k = lane / 2;
@@ -1218,36 +1208,67 @@ __global__ void sdpa_kernel_mma_fp16(
         cp_async_16B(s_vstage + buf * 256 + k * 16 + n,
                      v_ptr + (kv_start + k) * d_v + dv + n);
     };
-    auto transpose_v_chunk = [&] (int buf) {
-        int k = lane / 2;
-        int n0 = (lane % 2) * 8;
-        const __half* src = s_vstage + buf * 256 + k * 16 + n0;
-        __half* dst = s_vchunk + buf * 256;
-        #pragma unroll
-        for (int i = 0; i < 8; i++) {
-            dst[(n0 + i) * 16 + k] = src[i];
+
+    for (int q_tile = 0; q_tile < Q_TILES_PER_CTA; q_tile++) {
+        int q_start = q_block_start + q_tile * Q_ROWS;
+        if (q_start >= seq_len_q) break;
+
+        // Fold the softmax scale and the natural-log → log2 conversion into Q
+        // at load. Then the QKT result is already log2-space, the per-tile
+        // `acc *= scale` loop disappears, and softmax uses exp2 directly
+        // (saves an fmul per exp call — 8 per kv-tile per lane).
+        const __half2 q_scale_h2 = __float2half2_rn(scale * 1.4426950408889634f);
+        for (int i = tid; i < total_q_ops; i += 128) {
+            int idx = i * 8;
+            int row = idx / d_k;
+            int col = idx % d_k;
+            bool in_range = (q_start + row) < seq_len_q;
+            float4* dst = reinterpret_cast<float4*>(s_q + row * d_k + col);
+            if (in_range) {
+                float4 raw = *reinterpret_cast<const float4*>(q_base + (q_start + row) * d_k + col);
+                __half2* h = reinterpret_cast<__half2*>(&raw);
+                h[0] = __hmul2(h[0], q_scale_h2);
+                h[1] = __hmul2(h[1], q_scale_h2);
+                h[2] = __hmul2(h[2], q_scale_h2);
+                h[3] = __hmul2(h[3], q_scale_h2);
+                *dst = raw;
+            } else {
+                *dst = float4{0.0f, 0.0f, 0.0f, 0.0f};
+            }
         }
-    };
+        __syncthreads();
 
-    if (warp_id == 0) {
-        issue_k_chunk(0, 0, 0);
-        cp_async_commit();
-    }
+        for (int dv_pass = 0; dv_pass < D_V_PASSES; dv_pass++) {
+            int dv_pass_offset = dv_pass * DV_CHUNKS * 16;
 
-    float m_r0 = -FLT_MAX, m_r1 = -FLT_MAX;
-    float l_r0 = 0.0f,     l_r1 = 0.0f;
+            float oacc[DV_CHUNKS][2][4];
+            #pragma unroll
+            for (int i = 0; i < DV_CHUNKS; i++) {
+                #pragma unroll
+                for (int n = 0; n < 2; n++) {
+                    oacc[i][n][0] = oacc[i][n][1] = oacc[i][n][2] = oacc[i][n][3] = 0.0f;
+                }
+            }
+
+            if (warp_id == 0) {
+                issue_k_chunk(0, 0, 0);
+                cp_async_commit();
+            }
+
+            float m_r0 = -FLT_MAX, m_r1 = -FLT_MAX;
+            float l_r0 = 0.0f,     l_r1 = 0.0f;
 
     for (int kv_start = 0; kv_start < seq_len_k; kv_start += 16) {
         float acc[2][4] = {{0.0f, 0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f, 0.0f}};
 
         for (int dk_chunk = 0; dk_chunk < dk_chunks; dk_chunk++) {
-            int dk = dk_chunk * 16;
+            int dk = dk_chunk * K_CHUNK_W;
             int cur_buf = dk_chunk & 1;
 
             if (warp_id == 0) {
                 if (dk_chunk + 1 < dk_chunks) {
                     int next_buf = (dk_chunk + 1) & 1;
-                    issue_k_chunk(kv_start, dk + 16, next_buf);
+                    issue_k_chunk(kv_start, dk + K_CHUNK_W, next_buf);
                     cp_async_commit();
                     cp_async_wait_group<1>();
                 } else {
@@ -1256,23 +1277,27 @@ __global__ void sdpa_kernel_mma_fp16(
             }
             __syncthreads();
 
-            uint32_t reg_q[4];
-            uint32_t reg_k0[2];
-            uint32_t reg_k1[2];
-            ldmatrix_m16n8_x4_b16(reg_q,
-                s_q + (q_row_off + smem_row_a) * d_k + dk + smem_col_a);
-            ldmatrix_m16n8_x2_b16(reg_k0, s_kchunk + cur_buf * 256 +  b_col      * 16 + b_khalf);
-            ldmatrix_m16n8_x2_b16(reg_k1, s_kchunk + cur_buf * 256 + (b_col + 8) * 16 + b_khalf);
-            mma_m16n8k16_fp32_fp16_fp16_fp32(acc[0], reg_q, reg_k0, acc[0]);
-            mma_m16n8k16_fp32_fp16_fp16_fp32(acc[1], reg_q, reg_k1, acc[1]);
-        }
-
-        #pragma unroll
-        for (int n = 0; n < 2; n++) {
             #pragma unroll
-            for (int i = 0; i < 4; i++) acc[n][i] *= scale;
+            for (int half = 0; half < 2; half++) {
+                int dk_half = dk + half * 16;
+                int kchunk_col_off = half * 16;
+
+                uint32_t reg_q[4];
+                uint32_t reg_k0[2];
+                uint32_t reg_k1[2];
+                ldmatrix_m16n8_x4_b16(reg_q,
+                    s_q + (q_row_off + smem_row_a) * d_k + dk_half + smem_col_a);
+                ldmatrix_m16n8_x2_b16(reg_k0,
+                    s_kchunk + cur_buf * (16 * K_CHUNK_W) +  b_col      * K_CHUNK_W + kchunk_col_off + b_khalf);
+                ldmatrix_m16n8_x2_b16(reg_k1,
+                    s_kchunk + cur_buf * (16 * K_CHUNK_W) + (b_col + 8) * K_CHUNK_W + kchunk_col_off + b_khalf);
+                mma_m16n8k16_fp32_fp16_fp16_fp32(acc[0], reg_q, reg_k0, acc[0]);
+                mma_m16n8k16_fp32_fp16_fp16_fp32(acc[1], reg_q, reg_k1, acc[1]);
+            }
         }
 
+        // acc is already in log2 space (Q was pre-scaled by scale*log2(e) at
+        // load), so the per-tile *= scale step is gone and exp uses exp2 directly.
         float lane_max_r0 = fmaxf(fmaxf(acc[0][0], acc[0][1]),
                                   fmaxf(acc[1][0], acc[1][1]));
         float lane_max_r1 = fmaxf(fmaxf(acc[0][2], acc[0][3]),
@@ -1286,17 +1311,17 @@ __global__ void sdpa_kernel_mma_fp16(
         bool update_r1 = (lane_max_r1 - m_r1) > SOFTMAX_MAX_UPDATE_THRESHOLD;
         float new_m_r0 = update_r0 ? lane_max_r0 : m_r0;
         float new_m_r1 = update_r1 ? lane_max_r1 : m_r1;
-        float corr_r0  = update_r0 ? exp_approx(m_r0 - new_m_r0) : 1.0f;
-        float corr_r1  = update_r1 ? exp_approx(m_r1 - new_m_r1) : 1.0f;
+        float corr_r0  = update_r0 ? exp2_approx(m_r0 - new_m_r0) : 1.0f;
+        float corr_r1  = update_r1 ? exp2_approx(m_r1 - new_m_r1) : 1.0f;
 
-        acc[0][0] = exp_approx(acc[0][0] - new_m_r0);
-        acc[0][1] = exp_approx(acc[0][1] - new_m_r0);
-        acc[1][0] = exp_approx(acc[1][0] - new_m_r0);
-        acc[1][1] = exp_approx(acc[1][1] - new_m_r0);
-        acc[0][2] = exp_approx(acc[0][2] - new_m_r1);
-        acc[0][3] = exp_approx(acc[0][3] - new_m_r1);
-        acc[1][2] = exp_approx(acc[1][2] - new_m_r1);
-        acc[1][3] = exp_approx(acc[1][3] - new_m_r1);
+        acc[0][0] = exp2_approx(acc[0][0] - new_m_r0);
+        acc[0][1] = exp2_approx(acc[0][1] - new_m_r0);
+        acc[1][0] = exp2_approx(acc[1][0] - new_m_r0);
+        acc[1][1] = exp2_approx(acc[1][1] - new_m_r0);
+        acc[0][2] = exp2_approx(acc[0][2] - new_m_r1);
+        acc[0][3] = exp2_approx(acc[0][3] - new_m_r1);
+        acc[1][2] = exp2_approx(acc[1][2] - new_m_r1);
+        acc[1][3] = exp2_approx(acc[1][3] - new_m_r1);
 
         float sum_r0 = acc[0][0] + acc[0][1] + acc[1][0] + acc[1][1];
         float sum_r1 = acc[0][2] + acc[0][3] + acc[1][2] + acc[1][3];
@@ -1344,7 +1369,7 @@ __global__ void sdpa_kernel_mma_fp16(
         __syncthreads();
 
         if (warp_id == 0) {
-            issue_v_chunk(kv_start, 0, 0);
+            issue_v_chunk(kv_start, dv_pass_offset, 0);
             cp_async_commit();
         }
 
@@ -1356,7 +1381,7 @@ __global__ void sdpa_kernel_mma_fp16(
             if (warp_id == 0) {
                 if (dvc + 1 < DV_CHUNKS) {
                     int next_buf = (dvc + 1) & 1;
-                    issue_v_chunk(kv_start, dv + 16, next_buf);
+                    issue_v_chunk(kv_start, dv_pass_offset + dv + 16, next_buf);
                     cp_async_commit();
                     cp_async_wait_group<1>();
                 } else {
@@ -1365,15 +1390,14 @@ __global__ void sdpa_kernel_mma_fp16(
             }
             __syncthreads();
 
-            if (warp_id == 0) {
-                transpose_v_chunk(cur_buf);
-            }
-            __syncthreads();
-
             uint32_t reg_v0[2];
             uint32_t reg_v1[2];
-            ldmatrix_m16n8_x2_b16(reg_v0, s_vchunk + cur_buf * 256 +  b_col      * 16 + b_khalf);
-            ldmatrix_m16n8_x2_b16(reg_v1, s_vchunk + cur_buf * 256 + (b_col + 8) * 16 + b_khalf);
+            // ldmatrix.x2.trans: lanes 0..15 provide addresses to rows 0..15 of
+            // the row-major source. Two tiles (for x2) are stacked vertically
+            // in K, so lane t indexes V[t][col_offset]. reg_v0 covers N=0..7,
+            // reg_v1 covers N=8..15.
+            ldmatrix_m16n8_x2_trans_b16(reg_v0, s_vstage + cur_buf * 256 + smem_row_a * 16);
+            ldmatrix_m16n8_x2_trans_b16(reg_v1, s_vstage + cur_buf * 256 + smem_row_a * 16 + 8);
 
             mma_m16n8k16_fp32_fp16_fp16_fp32(oacc[dvc][0], reg_p, reg_v0, oacc[dvc][0]);
             mma_m16n8k16_fp32_fp16_fp16_fp32(oacc[dvc][1], reg_p, reg_v1, oacc[dvc][1]);
@@ -1386,39 +1410,47 @@ __global__ void sdpa_kernel_mma_fp16(
         __syncthreads();
     }
 
-    {
-        int q0 = q_start + q_row_off + r0;
-        int q1 = q_start + q_row_off + r1;
-        bool ok0 = (q0 < seq_len_q);
-        bool ok1 = (q1 < seq_len_q);
-        float inv_l0 = ok0 ? (1.0f / l_r0) : 0.0f;
-        float inv_l1 = ok1 ? (1.0f / l_r1) : 0.0f;
-        #pragma unroll
-        for (int dvc = 0; dvc < DV_CHUNKS; dvc++) {
-            int dv = dvc * 16;
-            if (ok0) {
-                out_base[q0 * d_v + dv + c0]         = oacc[dvc][0][0] * inv_l0;
-                out_base[q0 * d_v + dv + c0 + 1]     = oacc[dvc][0][1] * inv_l0;
-                out_base[q0 * d_v + dv + c0 + 8]     = oacc[dvc][1][0] * inv_l0;
-                out_base[q0 * d_v + dv + c0 + 8 + 1] = oacc[dvc][1][1] * inv_l0;
-            }
-            if (ok1) {
-                out_base[q1 * d_v + dv + c0]         = oacc[dvc][0][2] * inv_l1;
-                out_base[q1 * d_v + dv + c0 + 1]     = oacc[dvc][0][3] * inv_l1;
-                out_base[q1 * d_v + dv + c0 + 8]     = oacc[dvc][1][2] * inv_l1;
-                out_base[q1 * d_v + dv + c0 + 8 + 1] = oacc[dvc][1][3] * inv_l1;
+        {
+            int q0 = q_start + q_row_off + r0;
+            int q1 = q_start + q_row_off + r1;
+            bool ok0 = (q0 < seq_len_q);
+            bool ok1 = (q1 < seq_len_q);
+            float inv_l0 = ok0 ? (1.0f / l_r0) : 0.0f;
+            float inv_l1 = ok1 ? (1.0f / l_r1) : 0.0f;
+            #pragma unroll
+            for (int dvc = 0; dvc < DV_CHUNKS; dvc++) {
+                int dv = dv_pass_offset + dvc * 16;
+                if (ok0) {
+                    out_base[q0 * d_v + dv + c0]         = oacc[dvc][0][0] * inv_l0;
+                    out_base[q0 * d_v + dv + c0 + 1]     = oacc[dvc][0][1] * inv_l0;
+                    out_base[q0 * d_v + dv + c0 + 8]     = oacc[dvc][1][0] * inv_l0;
+                    out_base[q0 * d_v + dv + c0 + 8 + 1] = oacc[dvc][1][1] * inv_l0;
+                }
+                if (ok1) {
+                    out_base[q1 * d_v + dv + c0]         = oacc[dvc][0][2] * inv_l1;
+                    out_base[q1 * d_v + dv + c0 + 1]     = oacc[dvc][0][3] * inv_l1;
+                    out_base[q1 * d_v + dv + c0 + 8]     = oacc[dvc][1][2] * inv_l1;
+                    out_base[q1 * d_v + dv + c0 + 8 + 1] = oacc[dvc][1][3] * inv_l1;
+                }
             }
         }
+
+            // Sync between dv passes so the next pass can safely reset cp.async pipeline.
+            __syncthreads();
+        } // end dv_pass loop
+
+        // Sync between Q-tiles so the next iter can safely overwrite s_q/s_kchunk.
+        __syncthreads();
     }
 }
 
 static size_t mma_fp16_smem_bytes(int64_t d_k, int64_t d_v) {
-    constexpr int Q_ROWS = 64;
+    constexpr int Q_ROWS    = 64;
+    constexpr int K_CHUNK_W = 32;
     (void)d_v;
-    return (size_t)Q_ROWS * (size_t)d_k * sizeof(__half)
-         + (size_t)2 * 16 * 16 * sizeof(__half)
-         + (size_t)2 * 16 * 16 * sizeof(__half)
-         + (size_t)2 * 16 * 16 * sizeof(__half);
+    return (size_t)Q_ROWS * (size_t)d_k * sizeof(__half)              // s_q
+         + (size_t)2 * 16 * K_CHUNK_W * sizeof(__half)                // s_kchunk
+         + (size_t)2 * 16 * 16        * sizeof(__half);               // s_vstage
 }
 
 void sdpa_mma_fp16_cuda(
@@ -1445,6 +1477,18 @@ void sdpa_mma_fp16_cuda(
     size_t smem_size = mma_fp16_smem_bytes(d_k, d_v);
     int dv_chunks_runtime = static_cast<int>(d_v / 16);
 
+    // sm_86 (consumer Ampere) caps dynamic smem at ~99 KB per CTA. s_q dominates
+    // and grows linearly with d_k — at d_k=1024 it alone is 128 KB, exceeding
+    // the cap. Fail with a clear message instead of letting the kernel launch
+    // return cudaErrorInvalidValue (which poisons the context).
+    constexpr size_t SMEM_HARD_CAP = 99 * 1024;
+    if (smem_size > SMEM_HARD_CAP) {
+        throw std::runtime_error(
+            "sdpa_mma_fp16: required smem (" + std::to_string(smem_size) +
+            " B) exceeds SM cap (" + std::to_string(SMEM_HARD_CAP) +
+            " B). Try smaller d_k.");
+    }
+
     auto launch = [&] (auto kernel_ptr) {
         if (smem_size > 48 * 1024) {
             cudaFuncSetAttribute(kernel_ptr,
@@ -1461,13 +1505,16 @@ void sdpa_mma_fp16_cuda(
     };
 
     switch (dv_chunks_runtime) {
-        case 4:  launch(&sdpa_kernel_mma_fp16<4>);  break;
-        case 8:  launch(&sdpa_kernel_mma_fp16<8>);  break;
-        case 16: launch(&sdpa_kernel_mma_fp16<16>); break;
-        case 32: launch(&sdpa_kernel_mma_fp16<32>); break;
+        case 4:  launch(&sdpa_kernel_mma_fp16<4>);     break;
+        case 8:  launch(&sdpa_kernel_mma_fp16<8>);     break;
+        case 16: launch(&sdpa_kernel_mma_fp16<16>);    break;
+        case 32: launch(&sdpa_kernel_mma_fp16<32>);    break;
+        // d_v=1024: 2 outer passes of 512 cols each (DV_CHUNKS=32 per pass).
+        // Same spill profile as the <32, 1> d_v=512 path, run twice.
+        case 64: launch(&sdpa_kernel_mma_fp16<32, 2>); break;
         default:
             throw std::runtime_error(
-                "sdpa_mma_fp16: d_v must be one of 64, 128, 256, 512");
+                "sdpa_mma_fp16: d_v must be one of 64, 128, 256, 512, 1024");
     }
 
     CUDA_CHECK(cudaGetLastError());

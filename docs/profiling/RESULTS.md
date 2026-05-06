@@ -838,7 +838,232 @@ each CTA does its work with far fewer L1 round-trips per kv-tile.
 formula for comparability with earlier rows; the bench prints the
 newer `2·B·H·S²·(Dk + Dv)` formula, which divides everything by 1.5.)
 
-## What I'd actually do next (post-Step 13)
+## Step 14 — apples-to-apples sweep, three optimizations attempted
+
+After Step 13 the next push was three bottlenecks identified from the
+roofline + ptxas analysis:
+
+1. **Redundant global K/V reads.** `Q_ROWS=64` × `S=256` means 4 Q-CTAs
+   per (b,h) each reading the full K and V — ~4× DRAM redundancy.
+2. **`d_v=512` register spill.** ptxas hit the 255-reg cap and spilled
+   588 B back to local memory.
+3. **Per-tile `__syncthreads`.** `dk_chunks × kv_chunks` = 32 × 16 =
+   512 block-wide barriers per CTA at the default config.
+
+### #1: Persistent Q-tile loop (regressed)
+
+Wrapped the kernel body in an outer `for (q_tile = 0; q_tile < 2; q_tile++)`
+loop so each CTA processed two consecutive Q-tiles for the same `(b,h)`.
+Result: regression across all configs (d=64 +50%, d=128 +70%, d=512 +20%).
+Halving the grid from 128 → 64 CTAs at B=4 H=8 dropped CTAs/SM from
+~2.8 → ~1.4, killing latency hiding. The L2 reuse benefit didn't recover
+the loss. Reverted to `Q_TILES_PER_CTA=1`; loop structure kept as a hook
+for proper persistent-CTA work later.
+
+### #2: Outer d_v split for d_v=512 (regressed)
+
+Added `D_V_PASSES` template parameter. For d_v=512, dispatched `<16, 2>`:
+two outer passes of 256 cols each, each pass with register-resident `oacc`
+(`DV_CHUNKS=16`, **0 stack frame, 0 spills**, 168 regs — verified with
+`-Xptxas=-v`). The spill was eliminated.
+
+But: each pass recomputes QKT and softmax for all kv tiles, so total
+compute grew ~50%. Wall time at d=512 went 1.91 ms → 2.43 ms (~25%
+slower). The local-memory traffic from the spill (~1 MB / CTA across
+the kernel call) was cheaper than 50% extra MMA work. Reverted to
+`<32, 1>` for d_v=512; kept the `D_V_PASSES` parameter wired up because
+it's also the path for d_v=1024.
+
+### #3: Wider d_k chunk for sync reduction (small win at d=512)
+
+Widened `s_kchunk` from `[2][16][16]` to `[2][16][32]` (`K_CHUNK_W=32`).
+Inner `dk_chunks` loop halved; each iter does two m16n8k16 MMAs against
+the two halves of the K dim. `__syncthreads` count drops 2×.
+
+Result: flat at d∈{64,128,256}, ~4% faster at d=512 (1.91 → 1.83 ms).
+Matches the math — at 512 syncs × ~10 cycles each, sync is ~1% of
+runtime, so cutting it in half saves <1%, dominated by run-to-run
+noise. Kept the wider chunk in place since it costs only ~1 KB more
+smem.
+
+### Apples-to-apples sweep across (B, S, d)
+
+The earlier "we beat PyTorch at long seqs" claim from the post-Step 13
+spot-check was wrong. The bench's `--only mma_fp16 pytorch` flag
+routed PyTorch through the **fp32** path (`pytorch`), not the
+`pytorch_fp16` path. fp16 vs fp32 is apples-to-oranges; cuDNN's fp16
+path is ~3× faster than its fp32 path, and tensorax's "win" disappears
+when matched.
+
+Did a full sweep over `B ∈ {1, 4}`, `S ∈ {128, 256, 512, 1024, 2048,
+4096, 8192}`, `d_k = d_v ∈ {64, 128, 256, 512, 1024}` with both kernels
+on fp16 inputs. Headline at B=4 H=8:
+
+| d | tensorax peak TFLOPS | PyTorch peak TFLOPS | best ratio |
+|---:|---:|---:|---:|
+| 64 | 12.6 (S=8192) | 32.5 (S=2048) | 0.38× |
+| 128 | 12.6 (S=8192) | 33.9 (S=2048) | 0.40× |
+| 256 |  9.5 (S=8192) | 31.5 (S=4096) | 0.32× |
+| 512 |  5.0 (S=8192) | 14.6 (S=2048) | 0.39× |
+| 1024 | unsupported (smem) | 14.0 | — |
+
+cuDNN is **2.5×-7× faster** across every supported config. The gap is
+widest at small problems (PyTorch barely warms up while we still pay
+full per-CTA setup) and tightest at long seq + large batch (~0.40×).
+Tensorax tops out at ~13 TFLOPS (~15% of GPU peak); PyTorch at ~33
+TFLOPS (~39% of peak).
+
+Full sweep CSV: `benchmarks/attn_sweep.csv`. Sweep script:
+`benchmarks/attn_sweep.py`.
+
+### What this means for the journal
+
+The Step 13 win (Step 7 → Step 13: 4.7 ms → 2.0 ms at the original
+default workload) is real *as an internal speedup over our prior
+state* — the kernel is materially better. But the framing in earlier
+revisions of this doc that "we match cuDNN at small d_v" was wrong;
+the comparison there used fp32 PyTorch numbers labeled as fp16. The
+apples-to-apples gap to cuDNN is much wider than I claimed and didn't
+close in steps 11-13.
+
+The `d_v=512` and `d=1024` failures plus the consistent 2.5× gap point
+to the structural items already listed below as the next pass — none
+of which is small.
+
+## Updated final state (post-Step 14, apples-to-apples)
+
+At B=4 H=8 S=256 Dk=Dv=512 (the historical reference workload):
+
+| Path | time | TFLOPS (old formula) | Δ vs Step 7 |
+|---|---:|---:|---:|
+| Step 7 (pre-attempt baseline)        | 4.7 ms | 1.37 | — |
+| Step 8 (multi-warp Q tiling)         | 4.7 ms | 1.38 | flat |
+| Step 9 (V[0] preissue)               | 4.8 ms | 1.35 | −1.5 % |
+| Step 10 (K[T+1] pingpong)            | 5.0 ms | 1.27 | −7.3 % |
+| Step 11 (FA-2 split-Q parallel QKT)  | 4.1 ms | 1.59 | +16 % |
+| Step 12 (oacc pack + lazy correction)| 3.7 ms | 1.76 | +28 % |
+| Step 13 (templated `DV_CHUNKS`)      | 2.0 ms | 3.24 | **+136 %** |
+| Step 14 (#1 reverted, #2 reverted, #3 kept) | 2.0 ms | 3.27 | +137 % |
+| **Step 15 (`ldmatrix.x2.trans` + Q pre-scale)** | **1.55 ms** | **4.18** | **+205 %** |
+| **PyTorch fp16 SDPA (cuDNN)**        | **0.30 ms** | **21.6** | — |
+
+We're at ~15% of cuDNN's throughput at this workload. Steps 11-13
+were real gains *over our prior state* but didn't close the gap to
+cuDNN, contrary to what the earlier "match at small d_v" framing
+implied.
+
+## Step 15 — drop the V transpose pass + pre-scale Q + exp2 softmax
+
+Two small mechanical wins on top of Step 13/14, both about removing
+work on the hot path rather than restructuring the kernel.
+
+### #A: `ldmatrix.x2.trans` for V
+
+The PV phase used to: cp.async V into `s_vstage` (row-major), then
+have warp 0 transpose it into `s_vchunk` (col-major), then
+`ldmatrix.x2` from `s_vchunk` for the B operand. Replaced with a
+direct `ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16` from
+`s_vstage` — the `.trans` qualifier transposes each 8×8 tile during
+the load itself.
+
+What this drops:
+
+- An explicit per-`dvc` transpose loop (8 fp16 stores per lane).
+- One `__syncthreads` per PV iter (the post-transpose barrier).
+- The `s_vchunk` smem buffer (saves 512 B / CTA).
+- The `transpose_v_chunk` lambda.
+
+Address pattern note: the existing col-major-style indexing
+(`b_col*16 + b_khalf`) does *not* port to `.trans` on a row-major
+source. With `.trans`, lanes 0..15 must supply addresses to rows
+0..15 of the row-major source, with the second tile (cols 8..15)
+selected by adding 8 to the column offset. Got this wrong on the
+first attempt and accuracy went to ~1.0 max-abs error; correct
+pattern is `s_vstage + smem_row_a*16 + {0, 8}`.
+
+**Result** at B=4 H=8 S=256 (best-of-many timing):
+
+| `d_v` | Step 13/14 | After `.trans` | speedup |
+|---:|---:|---:|---:|
+|  64 | 0.262 ms | 0.137 ms | **1.91×** |
+| 128 | 0.310 ms | 0.244 ms | 1.27× |
+| 256 | 0.890 ms | 0.582 ms | 1.53× |
+| 512 | 2.040 ms | 1.334 ms | 1.53× |
+
+Big win across all configs. The transpose pass + its sync was a real
+fraction of PV time, not noise.
+
+### #B: pre-scale Q + use `exp2.approx`
+
+Folded `scale * log2(e)` (≈ `1/√d_k * 1.4427`) into Q at the cp.async
+load — multiply each fp16 element by the constant before storing into
+`s_q`. After this, the QKT acc is in log2 space, so:
+
+- The per-tile `acc *= scale` loop disappears (16 fmuls per warp per
+  kv-tile).
+- `exp_approx(x) = exp2.approx(x * log2(e))` becomes just
+  `exp2.approx(x)` — one fmul dropped per exp call. With 8 exp calls
+  per kv-tile per lane (in the hot softmax path), that's 8 more fmuls
+  saved per kv-tile per lane.
+
+The lazy-correction threshold `SOFTMAX_MAX_UPDATE_THRESHOLD = 0.5`
+keeps its numeric value but now means "log2 of the relative skew",
+i.e. `exp2(0.5) ≈ 1.41` slack on `used_max` instead of
+`exp(0.5) ≈ 1.65`. Slightly tighter — small free precision gain.
+
+**Result** (best-of-5 with min-of-batch timing):
+
+| `d_v` | Before pre-scale | After pre-scale + `exp2` | Δ |
+|---:|---:|---:|---:|
+|  64 | 0.137 ms | 0.141 ms | within noise |
+| 128 | 0.244 ms | 0.243 ms | flat |
+| 256 | 0.582 ms | 0.563 ms | **−3%** |
+| 512 | 1.334 ms | 1.311 ms | **−2%** |
+
+Lands the predicted ~3-5% at the larger d configs where QKT inner
+loop dominates; below the noise floor at small d. Free, since the
+Q-load path was already being touched.
+
+Accuracy: max abs error vs PyTorch fp16 SDPA widens slightly from
+3e-4 to ~1e-3 because the pre-scaled Q is quantized to fp16 with the
+extra factor baked in. Still well within the 1e-2 tolerance.
+
+### Step 6 reference
+
+Step 6 in this journal had reverted the same `exp2` substitution as
+"a wash". That was on a kernel where softmax went through the
+`s_scores` smem round-trip — softmax wasn't the hot path. After Step
+11 moved softmax fully into registers, the exp calls *are* the hot
+path, and the saved fmul counts.
+
+### Apples-to-apples sweep (B=4 H=8) post-Step 15
+
+| d_v | tensorax peak | PyTorch peak | best ratio |
+|---:|---:|---:|---:|
+| 64  | 15.4 TFLOPS @ S=4096 | 33.2 TFLOPS @ S=1024 | 0.48× |
+| 128 | 15.9 TFLOPS @ S=8192 | 33.9 TFLOPS @ S=2048 | 0.50× |
+| 256 | 10.8 TFLOPS @ S=8192 | 31.3 TFLOPS @ S=2048 | 0.36× |
+| 512 |  6.2 TFLOPS @ S=4096 | 17.5 TFLOPS @ S=128  | 0.46× |
+
+Best ratio versus cuDNN is now **0.50× at d=128 S=8192** (was 0.40×
+in Step 14). The gap closes everywhere by 5-10pp absolute. cuDNN
+still ahead by 2× at every supported config.
+
+### `d_v=1024` / `d_k=1024` status
+
+Skipped from the sweep (`benchmarks/attn_sweep.py`) because `s_q` at
+`d_k=1024` is 128 KB, exceeding sm_86's 99 KB / CTA cap. Real
+support needs either:
+
+- **Q streaming**: re-load `s_q` slices per `dk_chunk` from L2;
+  pipeline like K. Q traffic inflates but L2-cached.
+- **Halve `Q_ROWS` to 32**: cuts `s_q` to 64 KB, fits, but only 2 warps
+  active in QKT/PV (others idle) — likely bigger throughput loss
+  than the streaming overhead.
+
+Either is a nontrivial change; leaving as a tracked TODO.
+
+## What I'd actually do next (post-Step 15)
 
 1. **Cut `s_q` smem.** The 64 KB `s_q` is the dominant CTA-resident
    footprint. Two ways:

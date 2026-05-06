@@ -6,8 +6,7 @@ import torch
 import tensorax as ts
 import tensorax.functional as F
 
-_ALL_NAMES = ["naive", "tiled", "flash", "mma", "mma_fp16",
-              "flash_optimized", "numpy", "pytorch", "pytorch_fp16"]
+_ALL_NAMES = ["naive", "tiled", "flash", "flash_optimized", "mma", "mma_fp16", "numpy", "pytorch", "pytorch_fp16"]
 
 _parser = argparse.ArgumentParser(
     description="SDPA benchmark. By default runs every variant; use --only to "
