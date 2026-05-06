@@ -304,6 +304,130 @@ namespace tensorax {
         TX_TICK(prof_buf, 6);
     }
 
+    __device__ __forceinline__ void mma_m16n8k8_tf32(
+        float d[4], const float a[4], const float b[2], const float c[4]) {
+        // tf32 multiplicands are passed via .b32 (uint32_t) operands — the
+        // hardware truncates the f32 mantissa to 10 bits during the op.
+        uint32_t a0 = __float_as_uint(a[0]);
+        uint32_t a1 = __float_as_uint(a[1]);
+        uint32_t a2 = __float_as_uint(a[2]);
+        uint32_t a3 = __float_as_uint(a[3]);
+        uint32_t b0 = __float_as_uint(b[0]);
+        uint32_t b1 = __float_as_uint(b[1]);
+        asm volatile(
+            "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 "
+            "{%0, %1, %2, %3}, "
+            "{%4, %5, %6, %7}, "
+            "{%8, %9}, "
+            "{%10, %11, %12, %13};\n"
+            : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
+            : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
+              "r"(b0), "r"(b1),
+              "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3])
+        );
+    }
+
+    __global__ void matmul_kernel_mma_tf32(
+        const float* __restrict__ A,
+        const float* __restrict__ B,
+        float* __restrict__ C,
+        int M, int N, int K
+    ) {
+        constexpr int BM = 128, BN = 128, BK = 16;
+        constexpr int MMA_M = 16, MMA_N = 8, MMA_K = 8;
+        constexpr int WARP_M = 64, WARP_N = 64;
+        constexpr int M_TILES = WARP_M / MMA_M;   // 4
+        constexpr int N_TILES = WARP_N / MMA_N;   // 8
+        constexpr int SUB_K   = BK / MMA_K;        // 2
+
+        int block_m = blockIdx.y * BM;
+        int block_n = blockIdx.x * BN;
+        int tid = threadIdx.x;
+        int warp_id = tid >> 5;             // 0..3
+        int lane    = tid & 31;
+        int warp_m_off = (warp_id / 2) * WARP_M;
+        int warp_n_off = (warp_id % 2) * WARP_N;
+
+        __shared__ float s_a[BM * BK];
+        __shared__ float s_b[BK * BN];
+
+        float acc[M_TILES][N_TILES][4] = {{{0.0f}}};
+
+        int K_chunks = K / BK;
+        for (int k_chunk = 0; k_chunk < K_chunks; k_chunk++) {
+            int k_base = k_chunk * BK;
+
+            // Load A tile [BM × BK]: 128*16/4 = 512 float4 / 128 threads = 4 each
+            #pragma unroll
+            for (int i = tid; i < BM * BK / 4; i += 128) {
+                int idx4 = i * 4;
+                int row = idx4 / BK;
+                int col = idx4 % BK;
+                *reinterpret_cast<float4*>(&s_a[row * BK + col]) =
+                    *reinterpret_cast<const float4*>(&A[(block_m + row) * K + k_base + col]);
+            }
+            // Load B tile [BK × BN]: 16*128/4 = 512 float4 / 128 threads = 4 each
+            #pragma unroll
+            for (int i = tid; i < BK * BN / 4; i += 128) {
+                int idx4 = i * 4;
+                int row = idx4 / BN;
+                int col = idx4 % BN;
+                *reinterpret_cast<float4*>(&s_b[row * BN + col]) =
+                    *reinterpret_cast<const float4*>(&B[(k_base + row) * N + block_n + col]);
+            }
+            __syncthreads();
+
+            #pragma unroll
+            for (int sub_k = 0; sub_k < SUB_K; sub_k++) {
+                int k_off = sub_k * MMA_K;
+
+                float a_frag[M_TILES][4];
+                #pragma unroll
+                for (int m = 0; m < M_TILES; m++) {
+                    int m_base = warp_m_off + m * MMA_M;
+                    a_frag[m][0] = s_a[(m_base + lane / 4)     * BK + k_off + (lane % 4)];
+                    a_frag[m][1] = s_a[(m_base + lane / 4 + 8) * BK + k_off + (lane % 4)];
+                    a_frag[m][2] = s_a[(m_base + lane / 4)     * BK + k_off + (lane % 4) + 4];
+                    a_frag[m][3] = s_a[(m_base + lane / 4 + 8) * BK + k_off + (lane % 4) + 4];
+                }
+
+                float b_frag[N_TILES][2];
+                #pragma unroll
+                for (int n = 0; n < N_TILES; n++) {
+                    int n_base = warp_n_off + n * MMA_N;
+                    b_frag[n][0] = s_b[(k_off + (lane % 4))     * BN + n_base + (lane / 4)];
+                    b_frag[n][1] = s_b[(k_off + (lane % 4) + 4) * BN + n_base + (lane / 4)];
+                }
+
+                #pragma unroll
+                for (int m = 0; m < M_TILES; m++) {
+                    #pragma unroll
+                    for (int n = 0; n < N_TILES; n++) {
+                        mma_m16n8k8_tf32(acc[m][n], a_frag[m], b_frag[n], acc[m][n]);
+                    }
+                }
+            }
+            __syncthreads();
+        }
+
+        // Write output. Each thread holds 8 cells per (m_tile, n_tile): 4 for two
+        // (row, col) pairs at row r0 = lane/4 and r0+8.
+        int row = lane / 4;
+        int col = (lane % 4) * 2;
+        #pragma unroll
+        for (int m = 0; m < M_TILES; m++) {
+            #pragma unroll
+            for (int n = 0; n < N_TILES; n++) {
+                int m_base = block_m + warp_m_off + m * MMA_M;
+                int n_base = block_n + warp_n_off + n * MMA_N;
+                C[(m_base + row)     * N + n_base + col]     = acc[m][n][0];
+                C[(m_base + row)     * N + n_base + col + 1] = acc[m][n][1];
+                C[(m_base + row + 8) * N + n_base + col]     = acc[m][n][2];
+                C[(m_base + row + 8) * N + n_base + col + 1] = acc[m][n][3];
+            }
+        }
+    }
+
     void matmul_cuda(const float* a, const float* b, float* c, int64_t batch_size, int64_t m, int64_t n, int64_t k) {
         TENSORAX_NVTX_RANGE("matmul.default");
         // Use naive kernel for simplicity
@@ -447,6 +571,35 @@ namespace tensorax {
             float* c_batch = c + batch * matrix_size_c;
             matmul_kernel_2d_blocktiling<BM, BN, BK, TM, TN>
                 <<<grid, block>>>(a_batch, b_batch, c_batch, m, n, k, alpha, beta, nullptr);
+        }
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+    }
+
+    void matmul_mma_tf32_cuda(
+        const float* a, const float* b, float* c,
+        int64_t batch_size, int64_t m, int64_t n, int64_t k
+    ) {
+        TENSORAX_NVTX_RANGE("matmul.mma_tf32");
+        constexpr int BM = 128, BN = 128, BK = 16;
+        if (m % BM != 0 || n % BN != 0 || k % BK != 0) {
+            // Fall back to 2d blocktiling with alpha=1, beta=0 for shape mismatch.
+            matmul_2d_blocktiling_cuda(a, b, c, batch_size, m, n, k, 1.0f, 0.0f);
+            return;
+        }
+        dim3 block(128);
+        dim3 grid(n / BN, m / BM);
+
+        int64_t matrix_size_a = m * k;
+        int64_t matrix_size_b = k * n;
+        int64_t matrix_size_c = m * n;
+
+        for (int64_t batch = 0; batch < batch_size; ++batch) {
+            matmul_kernel_mma_tf32<<<grid, block>>>(
+                a + batch * matrix_size_a,
+                b + batch * matrix_size_b,
+                c + batch * matrix_size_c,
+                (int)m, (int)n, (int)k);
         }
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaDeviceSynchronize());

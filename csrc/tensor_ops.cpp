@@ -487,6 +487,42 @@ namespace tensorax
         return result;
     }
 
+    TensorHandle matmul_with_mma_tf32(const TensorHandle &a, const TensorHandle &b)
+    {
+        size_t a_dims = a->shape.size();
+        size_t b_dims = b->shape.size();
+
+        int64_t m = a->shape[a_dims - 2];
+        int64_t k = a->shape[a_dims - 1];
+        int64_t n = b->shape[b_dims - 1];
+
+        int64_t batch_size = 1;
+        for (size_t i = 0; i < a_dims - 2; ++i) batch_size *= a->shape[i];
+
+        std::vector<int64_t> result_shape;
+        for (size_t i = 0; i < a_dims - 2; ++i) result_shape.push_back(a->shape[i]);
+        result_shape.push_back(m);
+        result_shape.push_back(n);
+
+        int64_t result_size = batch_size * m * n;
+        auto result = std::make_shared<TensorImpl>(
+            std::vector<float>(result_size), result_shape, a->dtype, a->device);
+
+        if (a->device == "cuda")
+        {
+#ifdef WITH_CUDA
+            matmul_mma_tf32_cuda(a->data, b->data, result->data, batch_size, m, n, k);
+#else
+            throw std::runtime_error("CUDA support not compiled");
+#endif
+        }
+        else
+        {
+            throw std::runtime_error("matmul_with_mma_tf32 is only implemented for CUDA tensors");
+        }
+        return result;
+    }
+
     TensorHandle matmul_with_2d_blocktiling(const TensorHandle &a, const TensorHandle &b, float alpha, float beta)
     {
         size_t a_dims = a->shape.size();
@@ -1557,6 +1593,8 @@ PYBIND11_MODULE(_C, m)
           py::arg("a"), py::arg("b"), py::arg("alpha") = 1.0f, py::arg("beta") = 0.0f);
     m.def("matmul_with_2d_blocktiling", &tensorax::matmul_with_2d_blocktiling,
           py::arg("a"), py::arg("b"), py::arg("alpha") = 1.0f, py::arg("beta") = 0.0f);
+    m.def("matmul_with_mma_tf32", &tensorax::matmul_with_mma_tf32,
+          py::arg("a"), py::arg("b"));
 
     // Utility
     m.def("randn", &tensorax::randn);

@@ -160,6 +160,9 @@ namespace tensorax
     void matmul_1d_blocktiling_cuda(const float *a, const float *b, float *c, int64_t batch_size, int64_t m, int64_t n, int64_t k, float alpha, float beta);
     void matmul_2d_blocktiling_cuda(const float *a, const float *b, float *c, int64_t batch_size, int64_t m, int64_t n, int64_t k, float alpha, float beta);
 
+    void matmul_mma_tf32_cuda(const float *a, const float *b, float *c,
+                              int64_t batch_size, int64_t m, int64_t n, int64_t k);
+
     void transpose_cuda(const float *in, float *out, int64_t batch_size, int64_t rows, int64_t cols);
 
     // Scaled Dot-Product Attention (SDPA)
