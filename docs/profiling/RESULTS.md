@@ -425,3 +425,267 @@ parameter tweak on this one.
 3. **Tuned schedule for memory hierarchy** — at this point the kernel is
    probably L2/HBM-bandwidth-bound on the inner cast+MMA cycle. Verify with
    nsys, then look at `cp.async.bulk` (sm_90) or larger tile sizes (sm_80+).
+
+---
+
+# Continuation: FA-2 → FA-3 path attempt (post-Step 7)
+
+Picking up the "What I'd do next" #1 (multi-warp Q tiling) and extending it
+into the structural FA-3 changes. The plan was three ordered steps with a
+benchmark after each so wins/losses are attributable to the change in
+isolation. Same workload throughout: `B=4, H=8, Sq=Sk=256, Dk=Dv=512`,
+fp16 inputs, 30-run wall-time benchmark via `benchmarks/attn_benchmark.py`.
+
+Pre-attempt baseline (= Step 7 result): **4.7 ms / 1.37 TFLOPS**.
+
+## Step 8 — FA-2 multi-warp Q tiling (32 queries / CTA, 2 groups × 4 warps)
+
+**Hypothesis:** at 16 queries / CTA, each block reloads the full K and V
+tensors for its 16 queries. Doubling queries / CTA and grouping warps so
+that two query groups share a single K load should halve K bandwidth per
+query and engage all 8 warps in PV. This is the structural change closest
+to FA-2's multi-warp Q layout.
+
+**Design:**
+
+- 256 threads / 8 warps per block.
+- 32 query rows / CTA, partitioned into **2 groups of 16** queries.
+- Group 0 = warps 0–3, group 1 = warps 4–7.
+- Warp 0 owns the K cp.async pipeline for the whole block; both groups
+  consume the same `s_kchunk` (broadcast via `__syncthreads`).
+- Group leaders (warps 0 & 4) do their group's QKT and softmax in parallel.
+- All 8 warps participate in PV: each warp owns a `d_v / 4` column slice of
+  the output for its group. Per-warp register accumulators (`oacc0[16][4]`,
+  `oacc1[16][4]`).
+
+**Result:** 4.7 ms → **4.7 ms / 1.38 TFLOPS** — net flat (+0.7 % within
+noise).
+
+**Why it didn't pay off:** doubling queries / CTA halved the grid (512 →
+256 CTAs across `B × H × Sq/Q_ROWS`). At this workload size we're already
+CTA-count bound (Step 5's negative result, restated). The K-share win and
+the gained-PV-parallelism cancelled with the lost SM occupancy. Step 5 had
+already taught us this; Step 8 confirms it for the multi-warp variant too.
+
+Kept the kernel structure in place because Steps 9 & 10 build on it.
+
+## Step 9 — FA-3 warp specialization (V[0] preissue by idle warps)
+
+**Hypothesis:** during QKT and softmax, only the two group leaders (warps
+0 & 4) are active — the other 6 warps idle. In FA-3 spirit, give those
+idle warps memory work: have warps 1–7 preissue `cp.async` for their
+slice's V[0] at the top of each kv-tile, so the V[0] cp.async runs in
+parallel with QKT + softmax + p-cast + corr. The first PV iteration's
+V wait then collapses (V[0] already landed by then).
+
+**Synchronization detail:** warp 0 was kept on its existing flow because
+it already owns K[0]'s cp.async group from the prior tile's tail. Adding
+a V group between K[0] and the next K issue would break the K pipeline's
+`cp_async_wait_group<1>` semantics (the wait would conflate K and V).
+
+**Result:** 4.8 ms / **1.35 TFLOPS** — small regression (−1.5 %).
+
+**Why it didn't pay off:** the existing PV inner pipeline already
+prefetches V[dvc+1] while computing on V[dvc]. The first-iteration V[0]
+wait was *not* actually exposed; the V[0] cp.async time was already
+hidden by the in-loop pipeline. The preissue added an extra
+`cp_async_commit` per tile per warp without a corresponding latency
+reduction. Net: noise + small bookkeeping cost.
+
+Kept the change in place to feed Step 10's premise (idle warps doing
+memory work).
+
+## Step 10 — FA-3 softmax/MMA pingpong (early K[T+1] preissue)
+
+**Hypothesis:** today the K[T+1][0] preissue lives at the *end* of tile
+T's PV phase — its only overlap window is the trailing `__syncthreads`
+plus QKT(T+1)'s setup. Hoisting it to *right after QKT(T) ends* gives it
+a much larger overlap window: score store + softmax + p-cast + corr +
+the entire PV phase of tile T. By the time QKT(T+1) starts, K[T+1][0]
+should be solidly landed.
+
+**Implementation:** moved the `if (warp_id == 0 && kv_start + 16 <
+seq_len_k) { issue_k_chunk(kv_start + 16, 0, 0); cp_async_commit(); }`
+from end-of-tile to immediately after the QKT loop terminates.
+
+**Result:** 5.0–5.1 ms / **1.27 TFLOPS** (3-run median) — clear
+regression (−7.3 %).
+
+**Why it backfired:** the new ordering puts K[T+1][0] in warp 0's
+cp.async group queue *before* PV's V groups for the current tile.
+PV's `cp_async_wait_group<1>` then blocks on K[T+1][0] in addition to
+V groups. softmax + corr + p-cast turned out to be too short to fully
+hide K[T+1][0]'s cp.async latency (16 × 16 fp16 chunk, ~256 bytes,
+typical L2-fetch cycles ≫ the few hundred cycles of softmax for 16
+rows). Net cost (PV's wait dragged out by K) > net benefit (no save
+because the existing end-of-tile preissue was already hiding behind
+`__syncthreads` adequately).
+
+This is the cleanest example in the journal so far of FA-3-on-Hopper
+patterns failing to translate to Ampere. On Hopper, mbarriers give each
+async op its own named barrier, so a softmax/MMA pingpong can wait on
+the right thing. On Ampere, every cp.async on the same thread is in
+the same FIFO group queue — adding K and V to the same queue means
+`wait_group<N>` can't distinguish them.
+
+## Updated final state
+
+| Path | time | TFLOPS | Δ vs Step 7 |
+|---|---:|---:|---:|
+| Step 7 (pre-attempt baseline)        | 4.7 ms | 1.37 | — |
+| Step 8 (multi-warp Q tiling)         | 4.7 ms | 1.38 | flat |
+| Step 9 (V[0] preissue specialization)| 4.8 ms | 1.35 | −1.5 % |
+| Step 10 (K[T+1] pingpong preissue)   | 5.0 ms | 1.27 | −7.3 % |
+| PyTorch fp16 SDPA (cuDNN reference)  | 0.25 ms | 17.3 | — |
+
+Best end-of-pass: still Step 7 / Step 8 at ~1.38 TFLOPS.
+
+## Why the FA-3 patterns didn't translate to Ampere
+
+The FA-3 wins on Hopper come from features Ampere lacks:
+
+- **TMA** — async DMA engine decoupled from compute warps. A producer
+  warp can issue copies without using compute issue slots.
+- **WGMMA** — warpgroup-level async MMAs. Compute warps can launch MMA
+  and continue, instead of stalling on `mma.sync`.
+- **mbarriers** — named async barriers, so each producer/consumer
+  channel has its own wait point.
+
+On Ampere with sync `mma.sync` + per-thread `cp.async.commit_group` /
+`cp.async.wait_group`, the same FA-3 patterns don't compose:
+
+1. **Producer/consumer warp split.** Every cp.async group lives on the
+   issuing thread's own per-thread queue. A "producer warp" that
+   issues for a "consumer warp" can't transfer the wait barrier — the
+   consumer either has to re-issue or fall back to `__syncthreads`,
+   which doesn't wait on cp.async.
+2. **Pingpong between phases.** Overlapping different phases puts more
+   cp.async groups in the same per-thread queue. `wait_group<N>` then
+   waits on *everything* outstanding, so the K phase ends up waiting
+   on V (Step 10's failure mode).
+
+## Where the time is actually going (revised)
+
+Register pressure dominates and was misjudged in Step 8's design:
+
+- `oacc0[MAX_CHUNKS=16][4]` + `oacc1[MAX_CHUNKS=16][4]` = 128 fp32 /
+  thread for output accumulators (≈ 150 regs / thread total).
+- 256 threads × 150 regs = ~38 K registers / CTA, vs Ampere's 64 K / SM.
+- That caps us at **1 CTA / SM** — well below the smem-derived ceiling.
+- For the workload here, only `dv_chunks_per_warp = d_v / 64 = 8` of the
+  16 `MAX_CHUNKS` slots are ever used. Halving `MAX_CHUNKS` to 8 (with
+  a host-side guard `d_v ≤ 512`) would free ~64 regs / thread.
+
+Step 8's design *added* register pressure (more queries / CTA = more
+PV accumulator state per warp), which is part of why it didn't gain
+despite the K-share win.
+
+## Negative results from this pass
+
+- **Multi-warp Q tiling at this workload (Step 8):** doubled
+  queries / CTA halved CTA count. Net flat. Same root cause as Step 5's
+  reverted Q_ROWS=32 — workload is CTA-count-bound. *Will* help at
+  larger Sq / smaller batch×heads.
+- **Idle-warp V[0] preissue (Step 9):** the optimization had nothing
+  to hide behind. The existing in-PV-loop prefetch was already hiding
+  V latency.
+- **Early K[T+1] preissue / pingpong (Step 10):** broke the PV
+  cp.async wait semantics. Whenever you push a phase's preload
+  earlier in a per-thread cp.async queue, you have to verify nothing
+  later in the queue is going to `wait_group` on it.
+
+## What I'd actually do next (revised)
+
+1. **`MAX_CHUNKS` reduction (16 → 8) + host-side guard** for `d_v ≤ 512`.
+   Halves the output-accumulator array. Highest expected ROI given
+   the diagnosis above — directly attacks the 1-CTA/SM ceiling.
+2. **Persistent CTA scheduling** — keep CTAs alive across multiple Q
+   tiles so launch overhead amortizes. Helpful when CTA count is the
+   limiter (which it is here).
+3. **Bigger d_k tile (32 or 64)** — fewer dk-chunks per QKT loop,
+   fewer `__syncthreads` per tile. Costs smem; revisit budget after
+   #1 frees registers.
+4. **Re-run Step 8 after #1 lands.** With register footprint halved,
+   the multi-warp Q tiling may stop regressing on occupancy and the
+   K-share win could finally show up.
+5. **Skip further FA-3 structural attempts** until on Hopper. The
+   per-thread cp.async-group queue is a hard ceiling for true
+   producer/consumer / pingpong on Ampere; the wins would need
+   mbarriers or a redesign that uses smem-based handshakes instead
+   of cp.async groups (more complex than the wins justify here).
+
+---
+
+## Step 11 — Real FA-2 split-Q (parallel QKT across all warps)
+
+**Diagnosis revisited.** Step 8's "multi-warp Q tiling" was multi-warp
+in name only: two group leaders did QKT serially while the other six
+warps idled at `__syncthreads`. So the K-share win had nothing to land
+against — per-row QKT throughput was unchanged from Step 7. The flat
+result wasn't an "occupancy vs CTA-count" wash; it was a *missing*
+parallelism. Same shape for the 4-warp Step 7 baseline: `if (warp_id
+== 0)` gated the whole QKT loop, so 3 of 4 warps idled.
+
+**Fix (FA-2 split-Q, properly):**
+
+- `Q_ROWS = 64`, organised as 4 warps × 16 rows. Each warp owns a
+  contiguous 16-row slice (`q_row_off = warp_id * 16`).
+- All 4 warps run `mma.sync` simultaneously against the same
+  `s_kchunk`. Warp 0 still owns the K cp.async pipeline; the other
+  three just consume after `__syncthreads`.
+- Softmax moves into registers per warp. Row-max / row-sum reduce
+  across the 4 lanes that share a row via `__shfl_xor_sync` (offsets
+  1 and 2). No `s_scores` round-trip.
+- `s_p` is gone. The MMA m16n8k16 C-output layout for `c0 = (lane%4)*2`
+  matches the A-operand layout for the next MMA with `k0 = c0`, so P
+  is packed straight from the QKT acc registers into `reg_p` —
+  no smem write/ldmatrix.
+- PV is per-warp row-resident: each warp does its 16 rows × full
+  `d_v`. V is loaded cooperatively (warp 0 issues, all warps consume),
+  double-buffered along `d_v` chunks. The old per-warp V layout
+  (`s_vstage[4][2][16][16]` / `s_vchunk[4][2][16][16]`) collapses to a
+  single `[2][16][16]` shared buffer.
+- Running m / l live in registers across the kv loop (`m_r0`, `m_r1`,
+  `l_r0`, `l_r1` per lane). `s_m` / `s_l` only used at the final
+  output-write sync point.
+
+**Result** (B=4, H=8, Sq=Sk=256, Dk=Dv=512, fp16, 30-run wall time,
+median of 4 invocations): **4.1 ms / 1.59 TFLOPS** — **+16 % TFLOPS /
+−13 % time vs Step 7**, the first real win in this continuation.
+(Run-to-run spread: 1.54–1.64 TFLOPS; a single best-of-one read 1.73,
+which is noise — steady state is ~1.6.)
+
+**Why this one paid off:**
+
+- QKT now uses 4× the MMA throughput per CTA (4 active warps vs 1).
+- Q_ROWS quadrupled (16 → 64), so each CTA covers 4× the queries
+  with the same QKT *time-per-tile*. Grid shrinks 4× → K bandwidth
+  per call drops 4× (each global K row is loaded by ¼ as many CTAs).
+- The smem footprint actually *shrunk* despite Q_ROWS growing,
+  because the per-warp V duplication and the `s_p` / `s_scores`
+  buffers all went away. So no occupancy hit from the larger Q tile.
+- Register pressure for the output accumulator is the same per warp as
+  Step 7's PV split (16 rows × `d_v`/4 in Step 7 = 16 rows × `d_v`
+  here, just spread over different cols). `MAX_CHUNKS` was raised
+  16 → 32 to cover `d_v ≤ 512`.
+
+**Validation:** allclose vs PyTorch fp16 SDPA passes across
+`{Sq,Sk} ∈ {64, 80, 128, 256}`, `{Dk,Dv} ∈ {64, 128, 512}`, max abs
+error ~3e-4. The non-multiple-of-64 `Sq=80` case exercises the
+out-of-range Q-row zero-padding path.
+
+## Updated final state (post-Step 11)
+
+| Path | time | TFLOPS | Δ vs Step 7 |
+|---|---:|---:|---:|
+| Step 7 (pre-attempt baseline)        | 4.7 ms | 1.37 | — |
+| Step 8 (multi-warp Q tiling)         | 4.7 ms | 1.38 | flat |
+| Step 9 (V[0] preissue)               | 4.8 ms | 1.35 | −1.5 % |
+| Step 10 (K[T+1] pingpong)            | 5.0 ms | 1.27 | −7.3 % |
+| **Step 11 (FA-2 split-Q parallel QKT)** | **4.1 ms** | **1.59** | **+16 %** |
+| PyTorch fp16 SDPA (cuDNN reference)  | 0.25 ms | 17.3 | — |
+
+Step 11 is the first step in this continuation that produced a real
+gain, and it does so by fixing what was actually wrong with Step 8 —
+not by stacking more cp.async tricks.
+

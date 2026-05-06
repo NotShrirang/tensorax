@@ -2,7 +2,7 @@
 
 Tensorax is a deep learning framework written from scratch in C++/CUDA with a Python frontend. Every kernel — matmul, attention, elementwise ops, reductions — is hand-written. No PyTorch, no NumPy, no cuBLAS at runtime. The only dependency is `pybind11` for the C++/Python bridge.
 
-The goal is a clean, readable implementation of a DL framework from first principles that also runs fast on real hardware. The MMA attention kernel uses inline PTX assembly to hit Ampere Tensor Cores, and the best matmul variant runs at ~3x NumPy speed — all without calling into any external math library.
+The goal is a clean, readable implementation of a DL framework from first principles that also runs fast on real hardware. Both the MMA attention kernel and the MMA matmul kernel use inline PTX assembly to hit Ampere Tensor Cores, and the best matmul variant runs at ~4x NumPy speed — all without calling into any external math library.
 
 [![PyPI](https://img.shields.io/pypi/v/tensorax.svg?style=flat-square&color=blueviolet)](https://pypi.org/project/tensorax/)
 [![Python](https://img.shields.io/badge/python-3.9+-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/downloads/)
@@ -53,27 +53,28 @@ More examples in [`examples/`](examples/) and the full API reference in [`docs/U
 
 **Training.** SGD with momentum, Adam with bias correction. MSE, cross-entropy, and cross-entropy-from-logits losses. 5 LR schedulers: StepLR, CosineAnnealingLR, ExponentialLR, LinearLR, MultiStepLR.
 
-**CUDA kernels.** 6 matmul implementations (naive through 2D block tiling), 5 attention kernels, 14 element-wise ops. Shared memory tiling, coalesced access patterns, and `mma.sync` Tensor Core instructions where it matters.
+**CUDA kernels.** 7 matmul implementations (naive through 2D block tiling, plus an MMA TF32 Tensor Core kernel), 5 attention kernels, 14 element-wise ops. Shared memory tiling, coalesced access patterns, and `mma.sync` Tensor Core instructions where it matters.
 
 ## Benchmarks
 
 Matmul — fp32, 3x1024x1024, 100 iterations:
 
 ```
-PyTorch CUDA (cuBLAS)      0.08s  22.24x
-Tensorax 2D Block Tiling   0.58s   2.97x  <- best
-Tensorax 1D Block Tiling   0.64s   2.68x
-Tensorax Tiled             0.83s   2.05x
-Tensorax Cache Blocking    0.98s   1.75x
-Tensorax SM Coalesced      1.14s   1.50x
-Tensorax Default           1.18s   1.45x
-NumPy CPU (baseline)       1.71s   1.00x
+PyTorch CUDA (cuBLAS)      0.09s  22.6x  (7.4 TFLOPS)
+Tensorax MMA TF32          0.52s   3.9x  <- best (1.24 TFLOPS, Tensor Cores)
+Tensorax 2D Block Tiling   0.63s   3.2x  (1.02 TFLOPS)
+Tensorax 1D Block Tiling   0.76s   2.7x
+Tensorax Tiled             0.93s   2.2x
+Tensorax Cache Blocking    1.06s   1.9x
+Tensorax SM Coalesced      1.25s   1.6x
+Tensorax Default           1.25s   1.6x
+NumPy CPU (baseline)       2.03s   1.0x
 ```
 
 Attention — B=4 H=8 S=256 Dk=512 Dv=512, 30 iterations:
 
 ```
-Tensorax MMA fp16          0.14s    644x  <- best (1.37 TFLOPS)
+Tensorax MMA fp16          0.12s    736x  <- best (1.59 TFLOPS)
 PyTorch SDPA fp32          0.04s   2415x  (5.15 TFLOPS, internal TF32)
 Tensorax MMA fp32          0.30s    301x  (0.64 TFLOPS)
 Tensorax Optim. Flash      0.45s    201x  (0.43 TFLOPS)
@@ -85,15 +86,17 @@ Tensorax Naive SDPA       90.47s      1x
 
 The MMA kernel uses inline PTX `mma.sync.aligned.m16n8k16` Tensor Core instructions
 with online softmax (FA-style), `cp.async` double-buffered K/V streaming with
-overlap across kv-tile boundaries, 4-warp-tiled PV split along d_v, and
-register-resident output accumulators (no smem traffic for O between tiles).
+overlap across kv-tile boundaries, FA-2 split-Q across 4 warps (each warp owns
+16 query rows × full d_v with all warps running QKT in parallel against shared
+K), per-warp register-resident softmax via `__shfl_xor_sync` reductions, and
+register-resident output accumulators (no smem traffic for P or O between tiles).
 
 The fp16 path takes pre-cast fp16 Q/K/V (matching how a real KV cache feeds an
 inference workload) and skips the per-tile fp32→fp16 cast pass, giving a clean
-~2.1× speedup over the fp32-input variant. Still ~3.5× behind PyTorch's fp32
-SDPA (which dispatches to cuDNN's fused-attention path with multi-warp 64-row
-tiles and a tuned schedule we haven't implemented yet) — closing that gap is
-ongoing work; tracked in `ROADMAP.md`.
+~2.5× speedup over the fp32-input variant. Still ~3.2× behind PyTorch's fp32
+SDPA (which dispatches to cuDNN's fused-attention path with a tuned schedule we
+haven't implemented yet) — closing that gap is ongoing work; tracked in
+`ROADMAP.md`.
 
 ## Project layout
 

@@ -1146,8 +1146,9 @@ __global__ void sdpa_kernel_mma_fp16(
     int d_v,
     float scale
 ) {
-    constexpr int Q_ROWS  = 16;
-    constexpr int M_TILES = 1;
+    constexpr int NUM_WARPS     = 4;
+    constexpr int ROWS_PER_WARP = 16;
+    constexpr int Q_ROWS        = NUM_WARPS * ROWS_PER_WARP;
 
     int b = blockIdx.z / num_heads;
     int h = blockIdx.z % num_heads;
@@ -1157,6 +1158,7 @@ __global__ void sdpa_kernel_mma_fp16(
     int tid       = threadIdx.x;
     int warp_id   = tid >> 5;
     int lane      = tid & 31;
+    int q_row_off = warp_id * ROWS_PER_WARP;
     int qkv_base  = b * num_heads + h;
     const __half* q_base = Q + qkv_base * seq_len_q * d_k;
     const __half* k_ptr  = K + qkv_base * seq_len_k * d_k;
@@ -1165,14 +1167,9 @@ __global__ void sdpa_kernel_mma_fp16(
 
     extern __shared__ __half mma_smem[];
     __half* s_q       = mma_smem;
-    __half* s_p       = s_q + Q_ROWS * d_k;
-    __half* s_kchunk  = s_p + Q_ROWS * 16;                       // [2][16][16] fp16
-    __half* s_vstage  = s_kchunk + 2 * 16 * 16;                  // [4][2][16][16] fp16 row-major
-    __half* s_vchunk  = s_vstage + 4 * 2 * 16 * 16;              // [4][2][16][16] fp16 col-major
-    float*  s_scores  = reinterpret_cast<float*>(s_vchunk + 4 * 2 * 16 * 16);
-    float*  s_m       = s_scores + Q_ROWS * 16;
-    float*  s_l       = s_m + Q_ROWS;
-    float*  s_corr    = s_l + Q_ROWS;
+    __half* s_kchunk  = s_q + Q_ROWS * d_k;
+    __half* s_vstage  = s_kchunk + 2 * 16 * 16;
+    __half* s_vchunk  = s_vstage + 2 * 16 * 16;
 
     int r0         = lane / 4;
     int r1         = r0 + 8;
@@ -1195,22 +1192,19 @@ __global__ void sdpa_kernel_mma_fp16(
             *dst = float4{0.0f, 0.0f, 0.0f, 0.0f};
         }
     }
-    if (tid < Q_ROWS) { s_m[tid] = -FLT_MAX; s_l[tid] = 0.0f; }
 
-    constexpr int MAX_CHUNKS = 16;
-    float oacc0[M_TILES][MAX_CHUNKS][4];
-    float oacc1[M_TILES][MAX_CHUNKS][4];
+    constexpr int MAX_CHUNKS = 32; // bounds d_v / 16 (each warp owns full d_v)
+    float oacc0[MAX_CHUNKS][4];
+    float oacc1[MAX_CHUNKS][4];
     #pragma unroll
-    for (int mt = 0; mt < M_TILES; mt++) {
-        #pragma unroll
-        for (int i = 0; i < MAX_CHUNKS; i++) {
-            oacc0[mt][i][0] = oacc0[mt][i][1] = oacc0[mt][i][2] = oacc0[mt][i][3] = 0.0f;
-            oacc1[mt][i][0] = oacc1[mt][i][1] = oacc1[mt][i][2] = oacc1[mt][i][3] = 0.0f;
-        }
+    for (int i = 0; i < MAX_CHUNKS; i++) {
+        oacc0[i][0] = oacc0[i][1] = oacc0[i][2] = oacc0[i][3] = 0.0f;
+        oacc1[i][0] = oacc1[i][1] = oacc1[i][2] = oacc1[i][3] = 0.0f;
     }
     __syncthreads();
 
     int dk_chunks = d_k / 16;
+    int dv_chunks = d_v / 16;
 
     auto issue_k_chunk = [&] (int kv_start, int dk, int buf) {
         int row = lane / 2;
@@ -1218,19 +1212,17 @@ __global__ void sdpa_kernel_mma_fp16(
         cp_async_16B(s_kchunk + buf * 256 + row * 16 + col,
                      k_ptr + (kv_start + row) * d_k + dk + col);
     };
-    auto issue_v_chunk_warp = [&] (int kv_start, int dv, int buf) {
+    auto issue_v_chunk = [&] (int kv_start, int dv, int buf) {
         int k = lane / 2;
         int n = (lane % 2) * 8;
-        int slot = (warp_id * 2 + buf) * 256;
-        cp_async_16B(s_vstage + slot + k * 16 + n,
+        cp_async_16B(s_vstage + buf * 256 + k * 16 + n,
                      v_ptr + (kv_start + k) * d_v + dv + n);
     };
-    auto transpose_v_chunk_warp = [&] (int buf) {
+    auto transpose_v_chunk = [&] (int buf) {
         int k = lane / 2;
         int n0 = (lane % 2) * 8;
-        int slot = (warp_id * 2 + buf) * 256;
-        const __half* src = s_vstage + slot + k * 16 + n0;
-        __half* dst = s_vchunk + slot;
+        const __half* src = s_vstage + buf * 256 + k * 16 + n0;
+        __half* dst = s_vchunk + buf * 256;
         #pragma unroll
         for (int i = 0; i < 8; i++) {
             dst[(n0 + i) * 16 + k] = src[i];
@@ -1242,14 +1234,17 @@ __global__ void sdpa_kernel_mma_fp16(
         cp_async_commit();
     }
 
+    float m_r0 = -FLT_MAX, m_r1 = -FLT_MAX;
+    float l_r0 = 0.0f,     l_r1 = 0.0f;
+
     for (int kv_start = 0; kv_start < seq_len_k; kv_start += 16) {
-        if (warp_id == 0) {
-            float acc[M_TILES][2][4] = {{{0.0f}}};
+        float acc[2][4] = {{0.0f, 0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f, 0.0f}};
 
-            for (int dk_chunk = 0; dk_chunk < dk_chunks; dk_chunk++) {
-                int dk = dk_chunk * 16;
-                int cur_buf = dk_chunk & 1;
+        for (int dk_chunk = 0; dk_chunk < dk_chunks; dk_chunk++) {
+            int dk = dk_chunk * 16;
+            int cur_buf = dk_chunk & 1;
 
+            if (warp_id == 0) {
                 if (dk_chunk + 1 < dk_chunks) {
                     int next_buf = (dk_chunk + 1) & 1;
                     issue_k_chunk(kv_start, dk + 16, next_buf);
@@ -1258,141 +1253,122 @@ __global__ void sdpa_kernel_mma_fp16(
                 } else {
                     cp_async_wait_all();
                 }
-                __syncwarp();
-
-                uint32_t reg_q[M_TILES][4];
-                uint32_t reg_k0[2];
-                uint32_t reg_k1[2];
-                #pragma unroll
-                for (int mt = 0; mt < M_TILES; mt++) {
-                    ldmatrix_m16n8_x4_b16(reg_q[mt],
-                        s_q + (mt * 16 + smem_row_a) * d_k + dk + smem_col_a);
-                }
-                ldmatrix_m16n8_x2_b16(reg_k0, s_kchunk + cur_buf * 256 +  b_col      * 16 + b_khalf);
-                ldmatrix_m16n8_x2_b16(reg_k1, s_kchunk + cur_buf * 256 + (b_col + 8) * 16 + b_khalf);
-                #pragma unroll
-                for (int mt = 0; mt < M_TILES; mt++) {
-                    mma_m16n8k16_fp32_fp16_fp16_fp32(acc[mt][0], reg_q[mt], reg_k0, acc[mt][0]);
-                    mma_m16n8k16_fp32_fp16_fp16_fp32(acc[mt][1], reg_q[mt], reg_k1, acc[mt][1]);
-                }
             }
+            __syncthreads();
 
+            uint32_t reg_q[4];
+            uint32_t reg_k0[2];
+            uint32_t reg_k1[2];
+            ldmatrix_m16n8_x4_b16(reg_q,
+                s_q + (q_row_off + smem_row_a) * d_k + dk + smem_col_a);
+            ldmatrix_m16n8_x2_b16(reg_k0, s_kchunk + cur_buf * 256 +  b_col      * 16 + b_khalf);
+            ldmatrix_m16n8_x2_b16(reg_k1, s_kchunk + cur_buf * 256 + (b_col + 8) * 16 + b_khalf);
+            mma_m16n8k16_fp32_fp16_fp16_fp32(acc[0], reg_q, reg_k0, acc[0]);
+            mma_m16n8k16_fp32_fp16_fp16_fp32(acc[1], reg_q, reg_k1, acc[1]);
+        }
+
+        #pragma unroll
+        for (int n = 0; n < 2; n++) {
             #pragma unroll
-            for (int mt = 0; mt < M_TILES; mt++) {
-                int row_off = mt * 16;
-                s_scores[(row_off + r0) * 16 + c0]         = acc[mt][0][0] * scale;
-                s_scores[(row_off + r0) * 16 + c0 + 1]     = acc[mt][0][1] * scale;
-                s_scores[(row_off + r1) * 16 + c0]         = acc[mt][0][2] * scale;
-                s_scores[(row_off + r1) * 16 + c0 + 1]     = acc[mt][0][3] * scale;
-                s_scores[(row_off + r0) * 16 + c0 + 8]     = acc[mt][1][0] * scale;
-                s_scores[(row_off + r0) * 16 + c0 + 8 + 1] = acc[mt][1][1] * scale;
-                s_scores[(row_off + r1) * 16 + c0 + 8]     = acc[mt][1][2] * scale;
-                s_scores[(row_off + r1) * 16 + c0 + 8 + 1] = acc[mt][1][3] * scale;
-            }
-            __syncwarp();
-
-            if (lane < Q_ROWS) {
-                float old_max = s_m[lane];
-                float tile_max = -FLT_MAX;
-                for (int j = 0; j < 16; j++) {
-                    tile_max = fmaxf(tile_max, s_scores[lane * 16 + j]);
-                }
-                float new_max = fmaxf(old_max, tile_max);
-                float corr = exp_approx(old_max - new_max);
-                float tile_sum = 0.0f;
-                for (int j = 0; j < 16; j++) {
-                    float p = exp_approx(s_scores[lane * 16 + j] - new_max);
-                    s_scores[lane * 16 + j] = p;
-                    tile_sum += p;
-                }
-                s_m[lane]    = new_max;
-                s_l[lane]    = s_l[lane] * corr + tile_sum;
-                s_corr[lane] = corr;
-            }
+            for (int i = 0; i < 4; i++) acc[n][i] *= scale;
         }
-        __syncthreads();
 
-        for (int i = tid; i < (Q_ROWS * 16) / 2; i += 128) {
-            int idx = i * 2;
-            *reinterpret_cast<__half2*>(s_p + idx) =
-                __floats2half2_rn(s_scores[idx], s_scores[idx + 1]);
+        float lane_max_r0 = fmaxf(fmaxf(acc[0][0], acc[0][1]),
+                                  fmaxf(acc[1][0], acc[1][1]));
+        float lane_max_r1 = fmaxf(fmaxf(acc[0][2], acc[0][3]),
+                                  fmaxf(acc[1][2], acc[1][3]));
+        lane_max_r0 = fmaxf(lane_max_r0, __shfl_xor_sync(FULL_WARP_MASK, lane_max_r0, 1));
+        lane_max_r0 = fmaxf(lane_max_r0, __shfl_xor_sync(FULL_WARP_MASK, lane_max_r0, 2));
+        lane_max_r1 = fmaxf(lane_max_r1, __shfl_xor_sync(FULL_WARP_MASK, lane_max_r1, 1));
+        lane_max_r1 = fmaxf(lane_max_r1, __shfl_xor_sync(FULL_WARP_MASK, lane_max_r1, 2));
+
+        float new_m_r0 = fmaxf(m_r0, lane_max_r0);
+        float new_m_r1 = fmaxf(m_r1, lane_max_r1);
+        float corr_r0  = exp_approx(m_r0 - new_m_r0);
+        float corr_r1  = exp_approx(m_r1 - new_m_r1);
+
+        acc[0][0] = exp_approx(acc[0][0] - new_m_r0);
+        acc[0][1] = exp_approx(acc[0][1] - new_m_r0);
+        acc[1][0] = exp_approx(acc[1][0] - new_m_r0);
+        acc[1][1] = exp_approx(acc[1][1] - new_m_r0);
+        acc[0][2] = exp_approx(acc[0][2] - new_m_r1);
+        acc[0][3] = exp_approx(acc[0][3] - new_m_r1);
+        acc[1][2] = exp_approx(acc[1][2] - new_m_r1);
+        acc[1][3] = exp_approx(acc[1][3] - new_m_r1);
+
+        float sum_r0 = acc[0][0] + acc[0][1] + acc[1][0] + acc[1][1];
+        float sum_r1 = acc[0][2] + acc[0][3] + acc[1][2] + acc[1][3];
+        sum_r0 += __shfl_xor_sync(FULL_WARP_MASK, sum_r0, 1);
+        sum_r0 += __shfl_xor_sync(FULL_WARP_MASK, sum_r0, 2);
+        sum_r1 += __shfl_xor_sync(FULL_WARP_MASK, sum_r1, 1);
+        sum_r1 += __shfl_xor_sync(FULL_WARP_MASK, sum_r1, 2);
+
+        m_r0 = new_m_r0;
+        m_r1 = new_m_r1;
+        l_r0 = l_r0 * corr_r0 + sum_r0;
+        l_r1 = l_r1 * corr_r1 + sum_r1;
+
+        #pragma unroll
+        for (int i = 0; i < MAX_CHUNKS; i++) {
+            oacc0[i][0] *= corr_r0;
+            oacc0[i][1] *= corr_r0;
+            oacc0[i][2] *= corr_r1;
+            oacc0[i][3] *= corr_r1;
+            oacc1[i][0] *= corr_r0;
+            oacc1[i][1] *= corr_r0;
+            oacc1[i][2] *= corr_r1;
+            oacc1[i][3] *= corr_r1;
         }
+
+        // MMA m16n8k16 C-output layout matches the A-operand layout when
+        // c0 = k0 = (lane%4)*2, so P packs straight from acc into reg_p.
+        uint32_t reg_p[4];
         {
-            float corr[M_TILES][2];
-            #pragma unroll
-            for (int mt = 0; mt < M_TILES; mt++) {
-                corr[mt][0] = s_corr[mt * 16 + r0];
-                corr[mt][1] = s_corr[mt * 16 + r1];
-            }
-            #pragma unroll
-            for (int mt = 0; mt < M_TILES; mt++) {
-                #pragma unroll
-                for (int i = 0; i < MAX_CHUNKS; i++) {
-                    oacc0[mt][i][0] *= corr[mt][0];
-                    oacc0[mt][i][1] *= corr[mt][0];
-                    oacc0[mt][i][2] *= corr[mt][1];
-                    oacc0[mt][i][3] *= corr[mt][1];
-                    oacc1[mt][i][0] *= corr[mt][0];
-                    oacc1[mt][i][1] *= corr[mt][0];
-                    oacc1[mt][i][2] *= corr[mt][1];
-                    oacc1[mt][i][3] *= corr[mt][1];
-                }
-            }
+            __half2 h0 = __floats2half2_rn(acc[0][0], acc[0][1]);
+            __half2 h1 = __floats2half2_rn(acc[0][2], acc[0][3]);
+            __half2 h2 = __floats2half2_rn(acc[1][0], acc[1][1]);
+            __half2 h3 = __floats2half2_rn(acc[1][2], acc[1][3]);
+            reg_p[0] = *reinterpret_cast<uint32_t*>(&h0);
+            reg_p[1] = *reinterpret_cast<uint32_t*>(&h1);
+            reg_p[2] = *reinterpret_cast<uint32_t*>(&h2);
+            reg_p[3] = *reinterpret_cast<uint32_t*>(&h3);
         }
+
         __syncthreads();
 
-        int dv_per_warp;
-        int dv_start;
-        int dv_chunks_per_warp;
-        if (d_v >= 64) {
-            dv_per_warp        = d_v / 4;
-            dv_start           = warp_id * dv_per_warp;
-            dv_chunks_per_warp = dv_per_warp / 16;
-        } else {
-            dv_per_warp        = d_v;
-            dv_start           = 0;
-            dv_chunks_per_warp = (warp_id == 0) ? (d_v / 16) : 0;
+        if (warp_id == 0) {
+            issue_v_chunk(kv_start, 0, 0);
+            cp_async_commit();
         }
 
-        if (dv_chunks_per_warp > 0) {
-        issue_v_chunk_warp(kv_start, dv_start, 0);
-        cp_async_commit();
-
-        for (int dvc = 0; dvc < dv_chunks_per_warp; dvc++) {
-            int dv = dv_start + dvc * 16;
+        for (int dvc = 0; dvc < dv_chunks; dvc++) {
+            int dv = dvc * 16;
             int cur_buf = dvc & 1;
 
-            if (dvc + 1 < dv_chunks_per_warp) {
-                int next_buf = (dvc + 1) & 1;
-                issue_v_chunk_warp(kv_start, dv + 16, next_buf);
-                cp_async_commit();
-                cp_async_wait_group<1>();
-            } else {
-                cp_async_wait_all();
+            if (warp_id == 0) {
+                if (dvc + 1 < dv_chunks) {
+                    int next_buf = (dvc + 1) & 1;
+                    issue_v_chunk(kv_start, dv + 16, next_buf);
+                    cp_async_commit();
+                    cp_async_wait_group<1>();
+                } else {
+                    cp_async_wait_all();
+                }
             }
-            __syncwarp();
+            __syncthreads();
 
-            transpose_v_chunk_warp(cur_buf);
-            __syncwarp();
+            if (warp_id == 0) {
+                transpose_v_chunk(cur_buf);
+            }
+            __syncthreads();
 
-            uint32_t reg_p[M_TILES][4];
             uint32_t reg_v0[2];
             uint32_t reg_v1[2];
-            int v_slot = (warp_id * 2 + cur_buf) * 256;
-            #pragma unroll
-            for (int mt = 0; mt < M_TILES; mt++) {
-                ldmatrix_m16n8_x4_b16(reg_p[mt],
-                    s_p + (mt * 16 + smem_row_a) * 16 + smem_col_a);
-            }
-            ldmatrix_m16n8_x2_b16(reg_v0, s_vchunk + v_slot +  b_col      * 16 + b_khalf);
-            ldmatrix_m16n8_x2_b16(reg_v1, s_vchunk + v_slot + (b_col + 8) * 16 + b_khalf);
+            ldmatrix_m16n8_x2_b16(reg_v0, s_vchunk + cur_buf * 256 +  b_col      * 16 + b_khalf);
+            ldmatrix_m16n8_x2_b16(reg_v1, s_vchunk + cur_buf * 256 + (b_col + 8) * 16 + b_khalf);
 
-            #pragma unroll
-            for (int mt = 0; mt < M_TILES; mt++) {
-                mma_m16n8k16_fp32_fp16_fp16_fp32(oacc0[mt][dvc], reg_p[mt], reg_v0, oacc0[mt][dvc]);
-                mma_m16n8k16_fp32_fp16_fp16_fp32(oacc1[mt][dvc], reg_p[mt], reg_v1, oacc1[mt][dvc]);
-            }
-        }
+            mma_m16n8k16_fp32_fp16_fp16_fp32(oacc0[dvc], reg_p, reg_v0, oacc0[dvc]);
+            mma_m16n8k16_fp32_fp16_fp16_fp32(oacc1[dvc], reg_p, reg_v1, oacc1[dvc]);
         }
 
         if (warp_id == 0 && kv_start + 16 < seq_len_k) {
@@ -1403,54 +1379,37 @@ __global__ void sdpa_kernel_mma_fp16(
     }
 
     {
-        int dv_per_warp_o, dv_start_o, dv_chunks_per_warp_o;
-        if (d_v >= 64) {
-            dv_per_warp_o        = d_v / 4;
-            dv_start_o           = warp_id * dv_per_warp_o;
-            dv_chunks_per_warp_o = dv_per_warp_o / 16;
-        } else {
-            dv_per_warp_o        = d_v;
-            dv_start_o           = 0;
-            dv_chunks_per_warp_o = (warp_id == 0) ? (d_v / 16) : 0;
-        }
-        #pragma unroll
-        for (int mt = 0; mt < M_TILES; mt++) {
-            int row_off = mt * 16;
-            int q0 = q_start + row_off + r0;
-            int q1 = q_start + row_off + r1;
-            bool ok0 = (q0 < seq_len_q);
-            bool ok1 = (q1 < seq_len_q);
-            float inv_l0 = ok0 ? (1.0f / s_l[row_off + r0]) : 0.0f;
-            float inv_l1 = ok1 ? (1.0f / s_l[row_off + r1]) : 0.0f;
-            for (int dvc = 0; dvc < dv_chunks_per_warp_o; dvc++) {
-                int dv = dv_start_o + dvc * 16;
-                if (ok0) {
-                    out_base[q0 * d_v + dv + c0]         = oacc0[mt][dvc][0] * inv_l0;
-                    out_base[q0 * d_v + dv + c0 + 1]     = oacc0[mt][dvc][1] * inv_l0;
-                    out_base[q0 * d_v + dv + c0 + 8]     = oacc1[mt][dvc][0] * inv_l0;
-                    out_base[q0 * d_v + dv + c0 + 8 + 1] = oacc1[mt][dvc][1] * inv_l0;
-                }
-                if (ok1) {
-                    out_base[q1 * d_v + dv + c0]         = oacc0[mt][dvc][2] * inv_l1;
-                    out_base[q1 * d_v + dv + c0 + 1]     = oacc0[mt][dvc][3] * inv_l1;
-                    out_base[q1 * d_v + dv + c0 + 8]     = oacc1[mt][dvc][2] * inv_l1;
-                    out_base[q1 * d_v + dv + c0 + 8 + 1] = oacc1[mt][dvc][3] * inv_l1;
-                }
+        int q0 = q_start + q_row_off + r0;
+        int q1 = q_start + q_row_off + r1;
+        bool ok0 = (q0 < seq_len_q);
+        bool ok1 = (q1 < seq_len_q);
+        float inv_l0 = ok0 ? (1.0f / l_r0) : 0.0f;
+        float inv_l1 = ok1 ? (1.0f / l_r1) : 0.0f;
+        for (int dvc = 0; dvc < dv_chunks; dvc++) {
+            int dv = dvc * 16;
+            if (ok0) {
+                out_base[q0 * d_v + dv + c0]         = oacc0[dvc][0] * inv_l0;
+                out_base[q0 * d_v + dv + c0 + 1]     = oacc0[dvc][1] * inv_l0;
+                out_base[q0 * d_v + dv + c0 + 8]     = oacc1[dvc][0] * inv_l0;
+                out_base[q0 * d_v + dv + c0 + 8 + 1] = oacc1[dvc][1] * inv_l0;
+            }
+            if (ok1) {
+                out_base[q1 * d_v + dv + c0]         = oacc0[dvc][2] * inv_l1;
+                out_base[q1 * d_v + dv + c0 + 1]     = oacc0[dvc][3] * inv_l1;
+                out_base[q1 * d_v + dv + c0 + 8]     = oacc1[dvc][2] * inv_l1;
+                out_base[q1 * d_v + dv + c0 + 8 + 1] = oacc1[dvc][3] * inv_l1;
             }
         }
     }
 }
 
 static size_t mma_fp16_smem_bytes(int64_t d_k, int64_t d_v) {
-    constexpr int Q_ROWS = 16;
+    constexpr int Q_ROWS = 64;
     (void)d_v;
-    return (size_t)Q_ROWS * (size_t)d_k * sizeof(__half)            // s_q
-         + (size_t)Q_ROWS * 16 * sizeof(__half)                      // s_p
-         + (size_t)2 * 16 * 16 * sizeof(__half)                      // s_kchunk
-         + (size_t)4 * 2 * 16 * 16 * sizeof(__half)                  // s_vstage
-         + (size_t)4 * 2 * 16 * 16 * sizeof(__half)                  // s_vchunk
-         + (size_t)Q_ROWS * 16 * sizeof(float)                       // s_scores
-         + (size_t)3 * Q_ROWS * sizeof(float);                       // s_m, s_l, s_corr
+    return (size_t)Q_ROWS * (size_t)d_k * sizeof(__half)
+         + (size_t)2 * 16 * 16 * sizeof(__half)
+         + (size_t)2 * 16 * 16 * sizeof(__half)
+         + (size_t)2 * 16 * 16 * sizeof(__half);
 }
 
 void sdpa_mma_fp16_cuda(
@@ -1472,7 +1431,7 @@ void sdpa_mma_fp16_cuda(
 
     float scale = 1.0f / sqrtf(static_cast<float>(d_k));
     dim3 block(128);
-    dim3 grid(1, CEIL_DIV(seq_len_q, 16), batch_size * num_heads);
+    dim3 grid(1, CEIL_DIV(seq_len_q, 64), batch_size * num_heads);
 
     size_t smem_size = mma_fp16_smem_bytes(d_k, d_v);
     if (smem_size > 48 * 1024) {
