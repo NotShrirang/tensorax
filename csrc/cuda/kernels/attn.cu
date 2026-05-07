@@ -1175,22 +1175,15 @@ __global__ void sdpa_kernel_mma_fp16(
     float* out_base      = out + qkv_base * seq_len_q * d_v;
 
     constexpr int K_CHUNK_W = 32;
-    // Pad each smem row by 8 fp16 (16 B) so the row stride isn't a multiple of
-    // 32 banks × 4 B = 128 B. Without this, ldmatrix gathering 8/16 different
-    // rows hits the same bank wave and serializes (ncu showed ~11-way conflict
-    // on 78% of shared loads). With +8 padding the bank shift per row becomes
-    // 4 (mod 32), dropping the worst case to 2-way over 16 lanes.
     constexpr int SMEM_ROW_PAD = 8;
-    constexpr int K_STRIDE     = K_CHUNK_W + SMEM_ROW_PAD;  // 40
-    constexpr int V_STRIDE     = 16        + SMEM_ROW_PAD;  // 24
+    constexpr int K_STRIDE     = K_CHUNK_W + SMEM_ROW_PAD;
+    constexpr int V_STRIDE     = 16        + SMEM_ROW_PAD;
     const int     q_stride     = d_k       + SMEM_ROW_PAD;
 
     extern __shared__ __half mma_smem[];
     __half* s_q       = mma_smem;
     __half* s_kchunk  = s_q + Q_ROWS * q_stride;
     __half* s_vstage  = s_kchunk + 2 * 16 * K_STRIDE;
-    // V is read directly from s_vstage via ldmatrix.x2.trans (transposes the
-    // 8×8 tiles in-flight).
 
     int r0         = lane / 4;
     int r1         = r0 + 8;
@@ -1222,10 +1215,6 @@ __global__ void sdpa_kernel_mma_fp16(
         int q_start = q_block_start + q_tile * Q_ROWS;
         if (q_start >= seq_len_q) break;
 
-        // Fold the softmax scale and the natural-log → log2 conversion into Q
-        // at load. Then the QKT result is already log2-space, the per-tile
-        // `acc *= scale` loop disappears, and softmax uses exp2 directly
-        // (saves an fmul per exp call — 8 per kv-tile per lane).
         const __half2 q_scale_h2 = __float2half2_rn(scale * 1.4426950408889634f);
         for (int i = tid; i < total_q_ops; i += 128) {
             int idx = i * 8;
@@ -1490,10 +1479,6 @@ void sdpa_mma_fp16_cuda(
     size_t smem_size = mma_fp16_smem_bytes(d_k, d_v);
     int dv_chunks_runtime = static_cast<int>(d_v / 16);
 
-    // sm_86 (consumer Ampere) caps dynamic smem at ~99 KB per CTA. s_q dominates
-    // and grows linearly with d_k — at d_k=1024 it alone is 128 KB, exceeding
-    // the cap. Fail with a clear message instead of letting the kernel launch
-    // return cudaErrorInvalidValue (which poisons the context).
     constexpr size_t SMEM_HARD_CAP = 99 * 1024;
     if (smem_size > SMEM_HARD_CAP) {
         throw std::runtime_error(
@@ -1501,6 +1486,9 @@ void sdpa_mma_fp16_cuda(
             " B) exceeds SM cap (" + std::to_string(SMEM_HARD_CAP) +
             " B). Try smaller d_k.");
     }
+
+    constexpr size_t SMEM_2_CTA_FLOOR = 34 * 1024;
+    if (smem_size < SMEM_2_CTA_FLOOR) smem_size = SMEM_2_CTA_FLOOR;
 
     auto launch = [&] (auto kernel_ptr) {
         if (smem_size > 48 * 1024) {
@@ -1522,8 +1510,6 @@ void sdpa_mma_fp16_cuda(
         case 8:  launch(&sdpa_kernel_mma_fp16<8>);     break;
         case 16: launch(&sdpa_kernel_mma_fp16<16>);    break;
         case 32: launch(&sdpa_kernel_mma_fp16<32>);    break;
-        // d_v=1024: 2 outer passes of 512 cols each (DV_CHUNKS=32 per pass).
-        // Same spill profile as the <32, 1> d_v=512 path, run twice.
         case 64: launch(&sdpa_kernel_mma_fp16<32, 2>); break;
         default:
             throw std::runtime_error(
