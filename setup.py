@@ -188,6 +188,8 @@ if cuda_available:
         'csrc/cuda/kernels/reduction.cu',
         'csrc/cuda/kernels/matmul.cu',
         'csrc/cuda/kernels/attn.cu',
+        'csrc/cuda/kernels/attn_hopper.cu',    # self-gates on TENSORAX_HOPPER
+        'csrc/cuda/kernels/matmul_hopper.cu',  # self-gates on TENSORAX_HOPPER
     ]
     _include_dirs = [
         'csrc',
@@ -196,11 +198,11 @@ if cuda_available:
         os.path.join(cuda_home, 'include'),
     ]
     if _arch == 'hopper':
-        _sources.append('csrc/cuda/kernels/attn_hopper.cu')
         _cutlass_home = os.environ.get('CUTLASS_HOME', '/opt/cutlass')
         _include_dirs += [
             os.path.join(_cutlass_home, 'include'),
             os.path.join(_cutlass_home, 'tools', 'util', 'include'),
+            os.path.join(_cutlass_home, 'examples', '88_hopper_fmha'),
         ]
 
     # CUDA extensions

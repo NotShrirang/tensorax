@@ -30,8 +30,24 @@ namespace tensorax
     };
 
     TensorHandle cast_to_fp16(const TensorHandle &src);
+    TensorHandle cast_to_fp32(const TensorHandle &src);
 
     TensorHandle scaled_dot_product_attention_mma_fp16(
+        const TensorHandle &query,
+        const TensorHandle &key,
+        const TensorHandle &value);
+
+    TensorHandle scaled_dot_product_attention_cute_fp16(
+        const TensorHandle &query,
+        const TensorHandle &key,
+        const TensorHandle &value);
+
+    TensorHandle scaled_dot_product_attention_cute_fp16_pingpong(
+        const TensorHandle &query,
+        const TensorHandle &key,
+        const TensorHandle &value);
+
+    TensorHandle scaled_dot_product_attention_cute_fp16_pp_q3(
         const TensorHandle &query,
         const TensorHandle &key,
         const TensorHandle &value);
@@ -60,6 +76,10 @@ namespace tensorax
     TensorHandle pow_op(const TensorHandle &x, float power);
 
     TensorHandle matmul(const TensorHandle &a, const TensorHandle &b);
+    TensorHandle matmul_cute_fp16(const TensorHandle &a, const TensorHandle &b);
+    TensorHandle matmul_cute_fp16_c4(const TensorHandle &a, const TensorHandle &b);
+    TensorHandle matmul_cute_fp16_pp(const TensorHandle &a, const TensorHandle &b);
+    TensorHandle matmul_cute_fp16_t256(const TensorHandle &a, const TensorHandle &b);
     TensorHandle transpose(const TensorHandle &a);
     TensorHandle sum(const TensorHandle &x, int64_t dim);
     TensorHandle mean(const TensorHandle &x, int64_t dim);
@@ -163,6 +183,18 @@ namespace tensorax
     void matmul_mma_tf32_cuda(const float *a, const float *b, float *c,
                               int64_t batch_size, int64_t m, int64_t n, int64_t k);
 
+    // CUTLASS Hopper GEMM CollectiveBuilder wrapper. A/B/C are fp16 device pointers.
+    // A is (B, M, K) row-major, B is (B, K, N) row-major, C is (B, M, N) row-major.
+    // M, N, K must be multiples of 8 (TMA 16B alignment / fp16 = 8 elements).
+    void matmul_cute_fp16_cuda(const void *A, const void *B, void *C,
+                               int64_t batch_size, int64_t m, int64_t n, int64_t k);
+    void matmul_cute_fp16_c4_cuda(const void *A, const void *B, void *C,
+                                  int64_t batch_size, int64_t m, int64_t n, int64_t k);
+    void matmul_cute_fp16_pp_cuda(const void *A, const void *B, void *C,
+                                  int64_t batch_size, int64_t m, int64_t n, int64_t k);
+    void matmul_cute_fp16_t256_cuda(const void *A, const void *B, void *C,
+                                    int64_t batch_size, int64_t m, int64_t n, int64_t k);
+
     void transpose_cuda(const float *in, float *out, int64_t batch_size, int64_t rows, int64_t cols);
 
     // Scaled Dot-Product Attention (SDPA)
@@ -187,7 +219,23 @@ namespace tensorax
                             float *out, int64_t batch_size, int64_t num_heads,
                             int64_t seq_len_q, int64_t seq_len_k, int64_t d_k, int64_t d_v);
 
+    // CUTLASS Hopper FMHA collective wrapper. Q/K/V/O are fp16 device pointers
+    // in (B, H, S, D) row-major layout. Sq, Sk must be multiples of 128 for v0.
+    void sdpa_cute_fp16_cuda(const void *Q, const void *K, const void *V,
+                             void *O,
+                             int64_t batch_size, int64_t num_heads,
+                             int64_t seq_len_q, int64_t seq_len_k, int64_t d);
+    void sdpa_cute_fp16_pingpong_cuda(const void *Q, const void *K, const void *V,
+                                      void *O,
+                                      int64_t batch_size, int64_t num_heads,
+                                      int64_t seq_len_q, int64_t seq_len_k, int64_t d);
+    void sdpa_cute_fp16_pp_q3_cuda(const void *Q, const void *K, const void *V,
+                                   void *O,
+                                   int64_t batch_size, int64_t num_heads,
+                                   int64_t seq_len_q, int64_t seq_len_k, int64_t d);
+
     void cast_f32_to_f16_cuda(const float *in, void *out, int64_t size);
+    void cast_f16_to_f32_cuda(const void *in, float *out, int64_t size);
 
     void sdpa_optimized_flash_cuda(const float *Q, const float *K, const float *V, const float *mask,
                                   float *out, int64_t batch_size, int64_t num_heads,

@@ -5,8 +5,9 @@ import numpy as np
 import torch
 import tensorax as ts
 import tensorax.functional as F
+from tensorax import _C
 
-_ALL_NAMES = ["naive", "tiled", "flash", "flash_optimized", "mma", "mma_fp16", "numpy", "pytorch", "pytorch_fp16", "pytorch_compile_fp16"]
+_ALL_NAMES = ["naive", "tiled", "flash", "flash_optimized", "mma", "mma_fp16", "cute_fp16", "cute_fp16_pp", "cute_fp16_pp_q3", "numpy", "pytorch", "pytorch_fp16", "pytorch_compile_fp16"]
 
 _parser = argparse.ArgumentParser(
     description="SDPA benchmark. By default runs every variant; use --only to "
@@ -107,6 +108,24 @@ def sdpa_mma_fp16():
     torch.cuda.synchronize()
     return c
 
+def sdpa_cute_fp16():
+    torch.cuda.synchronize()
+    c = F.scaled_dot_product_attention_cute_fp16(q_h, k_h, v_h)
+    torch.cuda.synchronize()
+    return c
+
+def sdpa_cute_fp16_pp():
+    torch.cuda.synchronize()
+    c = F.scaled_dot_product_attention_cute_fp16_pingpong(q_h, k_h, v_h)
+    torch.cuda.synchronize()
+    return c
+
+def sdpa_cute_fp16_pp_q3():
+    torch.cuda.synchronize()
+    c = F.scaled_dot_product_attention_cute_fp16_pp_q3(q_h, k_h, v_h)
+    torch.cuda.synchronize()
+    return c
+
 # Benchmarking NumPy reference SDPA
 def sdpa_numpy():
     scores = np.matmul(q_np, k_np.transpose(0, 1, 3, 2)) / np.sqrt(d_k)
@@ -161,11 +180,49 @@ _BENCHMARKS = {
     "flash_optimized": ("Optimized Flash SDPA", sdpa_flash_optimized),
     "mma":             ("MMA SDPA",              sdpa_mma),
     "mma_fp16":        ("MMA SDPA fp16",         sdpa_mma_fp16),
+    "cute_fp16":        ("CUTLASS Hopper FMHA fp16 (cooperative)",        sdpa_cute_fp16),
+    "cute_fp16_pp":     ("CUTLASS Hopper FMHA fp16 (pingpong)",           sdpa_cute_fp16_pp),
+    "cute_fp16_pp_q3":  ("CUTLASS Hopper FMHA fp16 (pingpong + StagesQ=3)", sdpa_cute_fp16_pp_q3),
     "numpy":           ("Numpy SDPA",            sdpa_numpy),
     "pytorch":         ("PyTorch SDPA",          sdpa_pytorch),
     "pytorch_fp16":    ("PyTorch SDPA fp16",     sdpa_pytorch_fp16),
     "pytorch_compile_fp16": ("PyTorch torch.compile SDPA fp16", sdpa_pytorch_compile_fp16),
 }
+
+def _accuracy_check_cute(label: str, kernel_fn) -> bool:
+    if d_k != 128 or d_k != d_v:
+        print(f"[{label}] SKIP accuracy check: requires D_k=D_v=128 (got D_k={d_k}, D_v={d_v})")
+        return False
+    if seq_len % 128 != 0:
+        print(f"[{label}] SKIP accuracy check: requires seq_len % 128 == 0 (got {seq_len})")
+        return False
+    try:
+        out_ts = kernel_fn(q_h, k_h, v_h)
+        out_fp32 = F.cast_to_fp32(out_ts)
+        torch.cuda.synchronize()
+    except Exception as e:
+        print(f"[{label}] SKIP accuracy check: kernel raised: {e}")
+        return False
+    out_np = np.asarray(_C.tensor_to_list(out_fp32._c_tensor), dtype=np.float32).reshape(out_fp32.shape)
+    ref = torch.nn.functional.scaled_dot_product_attention(
+        q_torch_fp16, k_torch_fp16, v_torch_fp16
+    ).float().cpu().numpy()
+    ok = np.allclose(out_np, ref, rtol=5e-3, atol=5e-3)
+    if ok:
+        print(f"[{label}] accuracy check PASS (vs torch SDPA fp16)")
+    else:
+        diff = np.abs(out_np - ref)
+        print(f"[{label}] accuracy check FAIL: max_abs={diff.max():.4e} mean_abs={diff.mean():.4e}")
+    return ok
+
+for _name, _kernel_fn in (
+    ("cute_fp16",        F.scaled_dot_product_attention_cute_fp16),
+    ("cute_fp16_pp",     F.scaled_dot_product_attention_cute_fp16_pingpong),
+    ("cute_fp16_pp_q3",  F.scaled_dot_product_attention_cute_fp16_pp_q3),
+):
+    if _name in _selected and not _accuracy_check_cute(_name, _kernel_fn):
+        print(f"[{_name}] dropping from benchmark set due to skipped/failed accuracy check")
+        _selected.discard(_name)
 
 if not _args.quiet:
     print("Warming up...")

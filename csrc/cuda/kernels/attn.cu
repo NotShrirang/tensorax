@@ -1561,6 +1561,14 @@ void cast_f32_to_f16_cuda(const float* in, void* out, int64_t size) {
     CUDA_CHECK(cudaGetLastError());
 }
 
+void cast_f16_to_f32_cuda(const void* in, float* out, int64_t size) {
+    int threads = 256;
+    int total4 = (int)((size + 3) / 4);
+    int blocks = (total4 + threads - 1) / threads;
+    cast_f16_to_f32<<<blocks, threads>>>(static_cast<const __half*>(in), out, (int)size);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 static size_t mma_smem_bytes(int64_t d_k, int64_t d_v) {
     constexpr int Q_ROWS = 32;
     (void)d_v;

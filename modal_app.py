@@ -21,6 +21,7 @@ from pathlib import Path
 import modal
 
 CUTLASS_TAG = "v4.4.2"
+CUTLASS_SPARSE_REV = "ex88-v1"
 CUDA_ARCH = "9.0"
 
 app = modal.App("tensora-hopper")
@@ -33,22 +34,23 @@ VOLUMES = {
     "/build_vol": build_vol,
 }
 
+_CUTLASS_MARKER = f"{CUTLASS_TAG}+{CUTLASS_SPARSE_REV}"
 _CUTLASS_SETUP = (
     "set -e; "
     "mkdir -p /cutlass_vol; "
-    f"if [ -f /cutlass_vol/.tag ] && [ \"$(cat /cutlass_vol/.tag)\" = \"{CUTLASS_TAG}\" ]; then "
-    f"  echo 'CUTLASS already at {CUTLASS_TAG}'; "
+    f"if [ -f /cutlass_vol/.tag ] && [ \"$(cat /cutlass_vol/.tag)\" = \"{_CUTLASS_MARKER}\" ]; then "
+    f"  echo 'CUTLASS already at {_CUTLASS_MARKER}'; "
     "else "
-    f"  echo 'Re-cloning CUTLASS at {CUTLASS_TAG}'; "
-    "  rm -rf /cutlass_vol/.git /cutlass_vol/.tag /cutlass_vol/include /cutlass_vol/tools; "
+    f"  echo 'Re-cloning CUTLASS at {_CUTLASS_MARKER}'; "
+    "  rm -rf /cutlass_vol/.git /cutlass_vol/.tag /cutlass_vol/include /cutlass_vol/tools /cutlass_vol/examples; "
     "  cd /cutlass_vol; "
     "  git init -q .; "
     "  git remote add origin https://github.com/NVIDIA/cutlass.git; "
     "  git config core.sparseCheckout true; "
-    "  printf 'include/\\ntools/util/include/\\n' > .git/info/sparse-checkout; "
+    "  printf 'include/\\ntools/util/include/\\nexamples/88_hopper_fmha/\\n' > .git/info/sparse-checkout; "
     f"  git fetch --depth 1 origin refs/tags/{CUTLASS_TAG}:refs/tags/{CUTLASS_TAG}; "
     f"  git checkout {CUTLASS_TAG}; "
-    f"  echo {CUTLASS_TAG} > .tag; "
+    f"  echo {_CUTLASS_MARKER} > .tag; "
     "fi"
 )
 
@@ -156,11 +158,53 @@ def benchmark(quick: bool = False):
     image=image,
     volumes=VOLUMES,
     gpu="H100",
+    timeout=600,
+    scaledown_window=30,
+)
+def bench_cute(times: int = 30):
+    """Run the cute_fp16 v0 shape (S=2048, D=128) against the fp16 SDPA baselines."""
+    _install_prebuilt()
+    cmd = [
+        "python", "benchmarks/attn_benchmark.py",
+        "--batch", "4", "--heads", "8",
+        "--seq_len", "2048", "--d_k", "128", "--d_v", "128",
+        "--times", str(times),
+        "--only", "cute_fp16", "cute_fp16_pp", "cute_fp16_pp_q3",
+                  "pytorch_fp16", "pytorch_compile_fp16",
+    ]
+    subprocess.run(cmd, cwd="/workspace", check=True)
+
+
+@app.function(
+    image=image,
+    volumes=VOLUMES,
+    gpu="H100",
+    timeout=600,
+    scaledown_window=30,
+)
+def bench_mm_cute(times: int = 30):
+    """Run the matmul cute_fp16 v0 shape (B=1, M=N=K=4096) against cuBLAS fp16 baseline."""
+    _install_prebuilt()
+    cmd = [
+        "python", "benchmarks/matmul_benchmark.py",
+        "--batch", "1",
+        "--M", "4096", "--K", "4096", "--N", "4096",
+        "--times", str(times),
+        "--only", "cute_fp16", "cute_fp16_c4", "cute_fp16_pp", "cute_fp16_t256",
+                  "pytorch_fp16", "pytorch_compile_fp16",
+    ]
+    subprocess.run(cmd, cwd="/workspace", check=True)
+
+
+@app.function(
+    image=image,
+    volumes=VOLUMES,
+    gpu="H100",
     timeout=1800,
     scaledown_window=30,
 )
 def profile(kernel: str = "mma_fp16"):
-    """Run ncu over a single kernel variant. Report saved to /build volume."""
+    """Run ncu over a single kernel variant at the default bench shape (B=4 H=8 S=256 D=512)."""
     _install_prebuilt()
     out = "/build_vol/ncu_report.ncu-rep"
     cmd = (
@@ -174,13 +218,42 @@ def profile(kernel: str = "mma_fp16"):
           "download with `modal volume get tensora-build ncu_report.ncu-rep`")
 
 
+@app.function(
+    image=image,
+    volumes=VOLUMES,
+    gpu="H100",
+    timeout=1800,
+    scaledown_window=30,
+)
+def profile_cute(kernel: str = "cute_fp16_pp"):
+    """Run ncu over a cute_* variant at the cute bench shape (B=4 H=8 S=2048 D=128)."""
+    _install_prebuilt()
+    out = f"/build_vol/ncu_report_{kernel}.ncu-rep"
+    cmd = (
+        f"ncu --set full --target-processes all -f -o {shlex.quote(out)} "
+        f"python benchmarks/attn_benchmark.py "
+        f"--batch 4 --heads 8 --seq_len 2048 --d_k 128 --d_v 128 "
+        f"--only {shlex.quote(kernel)} --times 3 --quiet"
+    )
+    subprocess.run(cmd, shell=True, cwd="/workspace", check=True)
+    build_vol.commit()
+    print(f"[profile_cute] report saved to tensora-build volume as ncu_report_{kernel}.ncu-rep — "
+          f"download with `modal volume get tensora-build ncu_report_{kernel}.ncu-rep`")
+
+
 @app.local_entrypoint()
-def main(action: str = "bench", quick: bool = False, kernel: str = "mma_fp16"):
+def main(action: str = "bench", quick: bool = False, kernel: str = "mma_fp16", times: int = 30):
     if action == "build":
         build.remote()
     elif action == "bench":
         benchmark.remote(quick=quick)
+    elif action == "bench-cute":
+        bench_cute.remote(times=times)
+    elif action == "bench-mm-cute":
+        bench_mm_cute.remote(times=times)
     elif action == "profile":
         profile.remote(kernel=kernel)
+    elif action == "profile-cute":
+        profile_cute.remote(kernel=kernel if kernel != "mma_fp16" else "cute_fp16_pp")
     else:
         sys.exit(f"unknown action: {action!r}")

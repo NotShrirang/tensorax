@@ -491,6 +491,14 @@ class Tensor:
                     return _C.matmul_with_2d_blocktiling(a_c_tensor, b_c_tensor, 1.0, 0.0)
                 elif method == "mma" or method == "mma_tf32":
                     return _C.matmul_with_mma_tf32(a_c_tensor, b_c_tensor)
+                elif method == "cute_fp16":
+                    return _C.matmul_cute_fp16(a_c_tensor, b_c_tensor)
+                elif method == "cute_fp16_c4":
+                    return _C.matmul_cute_fp16_c4(a_c_tensor, b_c_tensor)
+                elif method == "cute_fp16_pp":
+                    return _C.matmul_cute_fp16_pp(a_c_tensor, b_c_tensor)
+                elif method == "cute_fp16_t256":
+                    return _C.matmul_cute_fp16_t256(a_c_tensor, b_c_tensor)
                 else:
                     raise ValueError(f"Unknown matmul method: {method}")
         raise RuntimeError("C++ extension not built. Matrix multiplication not available.")

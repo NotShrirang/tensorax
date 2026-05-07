@@ -523,6 +523,65 @@ namespace tensorax
         return result;
     }
 
+    using MatmulCuteBackend = void (*)(const void *, const void *, void *,
+                                       int64_t, int64_t, int64_t, int64_t);
+
+    static TensorHandle _matmul_cute_fp16_impl(const TensorHandle &a, const TensorHandle &b,
+                                               MatmulCuteBackend backend)
+    {
+        if (a->device != "cuda" || b->device != "cuda")
+            throw std::runtime_error("matmul_cute_fp16: both tensors must be on CUDA");
+        if (a->dtype != "float16" || b->dtype != "float16")
+            throw std::runtime_error("matmul_cute_fp16: both tensors must have dtype float16 (use F.cast_to_fp16)");
+
+        size_t a_dims = a->shape.size();
+        size_t b_dims = b->shape.size();
+        if (a_dims < 2 || b_dims < 2)
+            throw std::runtime_error("matmul_cute_fp16: tensors must be at least 2D");
+
+        int64_t m = a->shape[a_dims - 2];
+        int64_t k = a->shape[a_dims - 1];
+        int64_t k_b = b->shape[b_dims - 2];
+        int64_t n = b->shape[b_dims - 1];
+        if (k != k_b)
+            throw std::runtime_error("matmul_cute_fp16: inner dimensions don't match");
+
+        int64_t batch_size = 1;
+        for (size_t i = 0; i < a_dims - 2; ++i) batch_size *= a->shape[i];
+
+        std::vector<int64_t> result_shape;
+        for (size_t i = 0; i < a_dims - 2; ++i) result_shape.push_back(a->shape[i]);
+        result_shape.push_back(m);
+        result_shape.push_back(n);
+
+        auto result = std::make_shared<TensorImpl>(
+            result_shape, std::string("float16"), std::string("cuda"));
+
+#ifdef WITH_CUDA
+        backend(a->data, b->data, result->data, batch_size, m, n, k);
+#else
+        throw std::runtime_error("CUDA support not compiled");
+#endif
+        return result;
+    }
+
+    TensorHandle matmul_cute_fp16(const TensorHandle &a, const TensorHandle &b)
+    {
+        return _matmul_cute_fp16_impl(a, b, matmul_cute_fp16_cuda);
+    }
+    TensorHandle matmul_cute_fp16_c4(const TensorHandle &a, const TensorHandle &b)
+    {
+        return _matmul_cute_fp16_impl(a, b, matmul_cute_fp16_c4_cuda);
+    }
+    TensorHandle matmul_cute_fp16_pp(const TensorHandle &a, const TensorHandle &b)
+    {
+        return _matmul_cute_fp16_impl(a, b, matmul_cute_fp16_pp_cuda);
+    }
+    TensorHandle matmul_cute_fp16_t256(const TensorHandle &a, const TensorHandle &b)
+    {
+        return _matmul_cute_fp16_impl(a, b, matmul_cute_fp16_t256_cuda);
+    }
+
     TensorHandle matmul_with_2d_blocktiling(const TensorHandle &a, const TensorHandle &b, float alpha, float beta)
     {
         size_t a_dims = a->shape.size();
@@ -1044,6 +1103,22 @@ namespace tensorax
 #endif
     }
 
+    TensorHandle cast_to_fp32(const TensorHandle &src)
+    {
+        if (src->dtype == "float32") return src;
+        if (src->dtype != "float16" && src->dtype != "half")
+            throw std::runtime_error("cast_to_fp32: source dtype must be float16");
+        if (src->device != "cuda")
+            throw std::runtime_error("cast_to_fp32: only CUDA tensors supported");
+#ifdef WITH_CUDA
+        auto dst = std::make_shared<TensorImpl>(src->shape, std::string("float32"), std::string("cuda"));
+        cast_f16_to_f32_cuda(src->data, dst->data, src->size);
+        return dst;
+#else
+        throw std::runtime_error("CUDA support not compiled");
+#endif
+    }
+
     TensorHandle scaled_dot_product_attention_mma_fp16(
         const TensorHandle &query,
         const TensorHandle &key,
@@ -1080,6 +1155,67 @@ namespace tensorax
         throw std::runtime_error("CUDA support not compiled");
 #endif
         return result;
+    }
+
+    using SdpaCuteBackend = void (*)(const void *, const void *, const void *,
+                                     void *, int64_t, int64_t, int64_t, int64_t, int64_t);
+
+    static TensorHandle _scaled_dot_product_attention_cute_fp16_impl(
+        const TensorHandle &query,
+        const TensorHandle &key,
+        const TensorHandle &value,
+        SdpaCuteBackend backend)
+    {
+        if (query->shape.size() != 4 || key->shape.size() != 4 || value->shape.size() != 4)
+            throw std::runtime_error("SDPA cute_fp16: Q, K, V must be 4D tensors");
+        if (query->device != "cuda" || key->device != "cuda" || value->device != "cuda")
+            throw std::runtime_error("SDPA cute_fp16: all tensors must be on CUDA");
+        if (query->dtype != "float16" || key->dtype != "float16" || value->dtype != "float16")
+            throw std::runtime_error("SDPA cute_fp16: all inputs must have dtype float16");
+
+        int64_t batch_size = query->shape[0];
+        int64_t num_heads  = query->shape[1];
+        int64_t seq_len_q  = query->shape[2];
+        int64_t d_k        = query->shape[3];
+        int64_t seq_len_k  = key->shape[2];
+        int64_t d_v        = value->shape[3];
+
+        if (key->shape[0] != batch_size || key->shape[1] != num_heads || key->shape[3] != d_k)
+            throw std::runtime_error("SDPA cute_fp16: Key dimensions don't match Query");
+        if (value->shape[0] != batch_size || value->shape[1] != num_heads || value->shape[2] != seq_len_k)
+            throw std::runtime_error("SDPA cute_fp16: Value dimensions don't match Key");
+        if (d_k != d_v)
+            throw std::runtime_error("SDPA cute_fp16: d_k must equal d_v");
+
+        std::vector<int64_t> output_shape = {batch_size, num_heads, seq_len_q, d_v};
+        auto result = std::make_shared<TensorImpl>(
+            output_shape, std::string("float16"), std::string("cuda"));
+
+#ifdef WITH_CUDA
+        backend(query->data, key->data, value->data, result->data,
+                batch_size, num_heads, seq_len_q, seq_len_k, d_k);
+#else
+        throw std::runtime_error("CUDA support not compiled");
+#endif
+        return result;
+    }
+
+    TensorHandle scaled_dot_product_attention_cute_fp16(
+        const TensorHandle &query, const TensorHandle &key, const TensorHandle &value)
+    {
+        return _scaled_dot_product_attention_cute_fp16_impl(query, key, value, sdpa_cute_fp16_cuda);
+    }
+
+    TensorHandle scaled_dot_product_attention_cute_fp16_pingpong(
+        const TensorHandle &query, const TensorHandle &key, const TensorHandle &value)
+    {
+        return _scaled_dot_product_attention_cute_fp16_impl(query, key, value, sdpa_cute_fp16_pingpong_cuda);
+    }
+
+    TensorHandle scaled_dot_product_attention_cute_fp16_pp_q3(
+        const TensorHandle &query, const TensorHandle &key, const TensorHandle &value)
+    {
+        return _scaled_dot_product_attention_cute_fp16_impl(query, key, value, sdpa_cute_fp16_pp_q3_cuda);
     }
 
     TensorHandle scaled_dot_product_attention_flash(
@@ -1570,8 +1706,19 @@ PYBIND11_MODULE(_C, m)
     m.def("scaled_dot_product_attention_mma_fp16", &tensorax::scaled_dot_product_attention_mma_fp16,
           py::arg("query"), py::arg("key"), py::arg("value"),
           "Scaled Dot-Product Attention (MMA Tensor Core, fp16 inputs, fp32 output)");
+    m.def("scaled_dot_product_attention_cute_fp16", &tensorax::scaled_dot_product_attention_cute_fp16,
+          py::arg("query"), py::arg("key"), py::arg("value"),
+          "Scaled Dot-Product Attention (CUTLASS Hopper FMHA, warp-specialized cooperative, fp16 in/out, D=128)");
+    m.def("scaled_dot_product_attention_cute_fp16_pingpong", &tensorax::scaled_dot_product_attention_cute_fp16_pingpong,
+          py::arg("query"), py::arg("key"), py::arg("value"),
+          "Scaled Dot-Product Attention (CUTLASS Hopper FMHA, warp-specialized pingpong, fp16 in/out, D=128)");
+    m.def("scaled_dot_product_attention_cute_fp16_pp_q3", &tensorax::scaled_dot_product_attention_cute_fp16_pp_q3,
+          py::arg("query"), py::arg("key"), py::arg("value"),
+          "Scaled Dot-Product Attention (Hopper FMHA pingpong + kStagesQ=3 tuning)");
     m.def("cast_to_fp16", &tensorax::cast_to_fp16, py::arg("tensor"),
           "Cast a fp32 CUDA tensor to fp16 (returns a new tensor with dtype='float16')");
+    m.def("cast_to_fp32", &tensorax::cast_to_fp32, py::arg("tensor"),
+          "Cast a fp16 CUDA tensor to fp32 (returns a new tensor with dtype='float32')");
     m.def("scaled_dot_product_attention_flash_optimized", &tensorax::scaled_dot_product_attention_flash_optimized,
             py::arg("query"), py::arg("key"), py::arg("value"), py::arg("mask") = nullptr,
             "Scaled Dot-Product Attention (optimized flash attention kernel)");
@@ -1593,6 +1740,18 @@ PYBIND11_MODULE(_C, m)
           py::arg("a"), py::arg("b"), py::arg("alpha") = 1.0f, py::arg("beta") = 0.0f);
     m.def("matmul_with_2d_blocktiling", &tensorax::matmul_with_2d_blocktiling,
           py::arg("a"), py::arg("b"), py::arg("alpha") = 1.0f, py::arg("beta") = 0.0f);
+    m.def("matmul_cute_fp16", &tensorax::matmul_cute_fp16,
+          py::arg("a"), py::arg("b"),
+          "Matmul via CUTLASS Hopper GEMM CollectiveBuilder (fp16, Tile<128,128,64>, Cluster<2,1,1>, Cooperative)");
+    m.def("matmul_cute_fp16_c4", &tensorax::matmul_cute_fp16_c4,
+          py::arg("a"), py::arg("b"),
+          "Matmul fp16 with Cluster<4,1,1> (multicast TMA across 4 CTAs)");
+    m.def("matmul_cute_fp16_pp", &tensorax::matmul_cute_fp16_pp,
+          py::arg("a"), py::arg("b"),
+          "Matmul fp16 with Pingpong schedule");
+    m.def("matmul_cute_fp16_t256", &tensorax::matmul_cute_fp16_t256,
+          py::arg("a"), py::arg("b"),
+          "Matmul fp16 with Tile<128,256,64> (bigger N tile)");
     m.def("matmul_with_mma_tf32", &tensorax::matmul_with_mma_tf32,
           py::arg("a"), py::arg("b"));
 
