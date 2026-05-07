@@ -6,7 +6,7 @@ import torch
 import tensorax as ts
 import tensorax.functional as F
 
-_ALL_NAMES = ["naive", "tiled", "flash", "flash_optimized", "mma", "mma_fp16", "numpy", "pytorch", "pytorch_fp16"]
+_ALL_NAMES = ["naive", "tiled", "flash", "flash_optimized", "mma", "mma_fp16", "numpy", "pytorch", "pytorch_fp16", "pytorch_compile_fp16"]
 
 _parser = argparse.ArgumentParser(
     description="SDPA benchmark. By default runs every variant; use --only to "
@@ -130,6 +130,14 @@ def sdpa_pytorch_fp16():
     torch.cuda.synchronize()
     return c
 
+_sdpa_compiled_fp16 = torch.compile(torch.nn.functional.scaled_dot_product_attention)
+
+def sdpa_pytorch_compile_fp16():
+    torch.cuda.synchronize()
+    c = _sdpa_compiled_fp16(q_torch_fp16, k_torch_fp16, v_torch_fp16)
+    torch.cuda.synchronize()
+    return c
+
 def compute_metrics(time_sec, batch, heads, seq_len, d_k, d_v, times, is_fp16=False):
     time_per_run = time_sec / times
 
@@ -156,6 +164,7 @@ _BENCHMARKS = {
     "numpy":           ("Numpy SDPA",            sdpa_numpy),
     "pytorch":         ("PyTorch SDPA",          sdpa_pytorch),
     "pytorch_fp16":    ("PyTorch SDPA fp16",     sdpa_pytorch_fp16),
+    "pytorch_compile_fp16": ("PyTorch torch.compile SDPA fp16", sdpa_pytorch_compile_fp16),
 }
 
 if not _args.quiet:
@@ -175,7 +184,7 @@ for _name in _ALL_NAMES:
     _label, _fn = _BENCHMARKS[_name]
     _t = timeit.timeit(_fn, number=times)
     
-    _is_fp16 = "fp16"
+    _is_fp16 = "fp16" in _name
     _tflops, _gbps, _ai = compute_metrics(_t, batch, heads, seq_len, d_k, d_v, times, is_fp16=_is_fp16)
     
     print(f"{_label} time over {times} runs: {_t:.4f}s | "

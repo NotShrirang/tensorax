@@ -27,6 +27,25 @@ with open('README.md', 'r', encoding='utf-8') as f:
     long_description = f.read()
 
 
+def detect_arch():
+    """Resolve the target arch. Explicit TENSORAX_ARCH wins; otherwise probe
+    the local GPU via nvidia-smi. sm_90+ -> hopper, else ampere."""
+    explicit = os.environ.get('TENSORAX_ARCH')
+    if explicit:
+        return explicit.lower()
+    try:
+        out = subprocess.check_output(
+            ['nvidia-smi', '--query-gpu=compute_cap', '--format=csv,noheader'],
+            stderr=subprocess.DEVNULL, text=True,
+        )
+        caps = [float(c.strip()) for c in out.splitlines() if c.strip()]
+        if caps and max(caps) >= 9.0:
+            return 'hopper'
+    except (subprocess.CalledProcessError, FileNotFoundError, ValueError, OSError):
+        pass
+    return 'ampere'
+
+
 def find_cuda():
     """Find CUDA installation"""
     # Check environment variable
@@ -104,16 +123,34 @@ class BuildExtension(build_ext):
         self.compiler._compile = custom_compile
         
         profile = bool(os.environ.get('TENSORAX_PROFILE'))
-        cxx_flags = ['-O3', '-std=c++17', '-fPIC']
-        nvcc_flags = [
-            '-O3',
-            '--use_fast_math',
-            '-std=c++17',
-            '--compiler-options', '-fPIC',
-            '-gencode=arch=compute_80,code=sm_80',
-            '-gencode=arch=compute_86,code=sm_86',
-            '-gencode=arch=compute_89,code=sm_89',
-        ]
+        arch = detect_arch()
+        print(f"TENSORAX target arch: {arch}")
+
+        if arch == 'hopper':
+            print("TENSORAX_ARCH=hopper -- targeting sm_90a, c++20, CUTLASS includes")
+            cxx_flags = ['-O3', '-std=c++20', '-fPIC', '-DTENSORAX_HOPPER']
+            nvcc_flags = [
+                '-O3',
+                '--use_fast_math',
+                '-std=c++20',
+                '--compiler-options', '-fPIC',
+                '-gencode=arch=compute_90a,code=sm_90a',
+                '--expt-relaxed-constexpr',
+                '--expt-extended-lambda',
+                '-DTENSORAX_HOPPER',
+            ]
+        else:
+            cxx_flags = ['-O3', '-std=c++17', '-fPIC']
+            nvcc_flags = [
+                '-O3',
+                '--use_fast_math',
+                '-std=c++17',
+                '--compiler-options', '-fPIC',
+                '-gencode=arch=compute_80,code=sm_80',
+                '-gencode=arch=compute_86,code=sm_86',
+                '-gencode=arch=compute_89,code=sm_89',
+            ]
+
         if profile:
             print("TENSORAX_PROFILE=1 -- emitting device-side clock64 ticks")
             cxx_flags.append('-DTENSORAX_PROFILE')
@@ -141,25 +178,36 @@ cuda_available = cuda_home is not None
 if cuda_available:
     print(f"Found CUDA at: {cuda_home}")
     print("Building with CUDA support")
-    
+
+    _arch = detect_arch()
+    _sources = [
+        'csrc/tensor_ops.cpp',
+        'csrc/cpu/tensor_cpu.cpp',  # CPU implementations needed too!
+        'csrc/cuda/tensor_cuda.cu',
+        'csrc/cuda/kernels/elementwise.cu',
+        'csrc/cuda/kernels/reduction.cu',
+        'csrc/cuda/kernels/matmul.cu',
+        'csrc/cuda/kernels/attn.cu',
+    ]
+    _include_dirs = [
+        'csrc',
+        'csrc/cuda',
+        pybind11_include,
+        os.path.join(cuda_home, 'include'),
+    ]
+    if _arch == 'hopper':
+        _sources.append('csrc/cuda/kernels/attn_hopper.cu')
+        _cutlass_home = os.environ.get('CUTLASS_HOME', '/opt/cutlass')
+        _include_dirs += [
+            os.path.join(_cutlass_home, 'include'),
+            os.path.join(_cutlass_home, 'tools', 'util', 'include'),
+        ]
+
     # CUDA extensions
     cuda_extension = CUDAExtension(
         name='tensorax._C',
-        sources=[
-            'csrc/tensor_ops.cpp',
-            'csrc/cpu/tensor_cpu.cpp',  # CPU implementations needed too!
-            'csrc/cuda/tensor_cuda.cu',
-            'csrc/cuda/kernels/elementwise.cu',
-            'csrc/cuda/kernels/reduction.cu',
-            'csrc/cuda/kernels/matmul.cu',
-            'csrc/cuda/kernels/attn.cu',
-        ],
-        include_dirs=[
-            'csrc',
-            'csrc/cuda',
-            pybind11_include,
-            os.path.join(cuda_home, 'include'),
-        ],
+        sources=_sources,
+        include_dirs=_include_dirs,
         library_dirs=[
             os.path.join(cuda_home, 'lib64'),
             os.path.join(cuda_home, 'lib'),
